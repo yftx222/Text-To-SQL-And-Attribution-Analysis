@@ -133,9 +133,12 @@ class AuthService:
 
     async def login(self, identifier: str, password: str) -> tuple[User, TokenPair]:
         """校验账号密码并签发令牌对。"""
+        #casefold() 将字符串转换为小写
         normalized = identifier.strip().casefold()
+        #begin配合async with使用：async with 进入时，这个对象负责开启事务；退出时，它负责自动提交或回滚
         async with self._repo.session.begin():
             user = (
+                #normalized是用户名或邮箱，判断是否包含@符号来区分
                 await self._repo.get_user_by_email_for_update(normalized)
                 if "@" in normalized
                 else await self._repo.get_user_by_username_for_update(normalized)

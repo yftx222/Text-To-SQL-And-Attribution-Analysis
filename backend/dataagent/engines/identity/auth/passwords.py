@@ -16,8 +16,13 @@ class Argon2PasswordManager:
         """初始化 Argon2id 哈希器和并发限制。"""
         if max_concurrency <= 0:
             raise ValueError("max_concurrency 必须为正整数")
+        #创建 argon2 的推荐配置哈希器（argon2-cffi 库）
         self._password_hash = PasswordHash.recommended()
+        # _dummy_hash：生成一个假密码哈希，用于防止时序攻击（timing attack）。当用户不存在时，
+        # 也跑一次 verify 消耗相同时间，避免攻击者通过响应时间差判断用户名是否存在。
         self._dummy_hash = self._password_hash.hash("dataagent-dummy-password")
+        # asyncio.Semaphore：用于限制并发访问的信号量，并发太高会拖垮线程池和 CPU。
+        # 确保同时只有 max_concurrency 个协程可以执行哈希计算。
         self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def hash(self, password: str) -> str:

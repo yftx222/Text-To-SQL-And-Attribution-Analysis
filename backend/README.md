@@ -1,0 +1,211 @@
+# DataAgent
+
+后端根目录为 `code/backend`。本页命令默认在该目录执行；源码归属、迁移清单与调用链见 [后端目录结构与迁移说明](后端目录结构与迁移说明.md)。
+
+现有环境继续使用 `code/.venv`。使用 uv 前，在后端目录设置环境位置：
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Split-Path (Get-Location).Path) ".venv"
+$env:PYTHONUTF8 = "1"
+```
+
+Linux / WSL 使用 `export UV_PROJECT_ENVIRONMENT="$(cd .. && pwd)/.venv"`。这些命令复用原有环境；首次克隆时按下文安装依赖。
+
+## 推荐运行环境
+
+在本机运行整套服务（应用、PostgreSQL、Elasticsearch、Redis 和 Doris），供单人使用并同时运行一个分析沙箱时，**建议至少配备 24 GB 内存**。该建议为容量估算，实际占用取决于数据规模、查询复杂度和并发量。
+
+推荐使用 **Ubuntu Linux**；Windows 开发环境建议通过 **WSL2 + Ubuntu** 运行项目。
+
+## 提示词与技能
+
+角色提示词位于 `dataagent/engines/prompts/agents/`
+公共文件协议和标题提示词位于 `dataagent/engines/prompts/`
+内置技能位于 `resources/skills/`
+部署时一同复制后端的 `dataagent/`、`resources/` 和 `conf/`。
+
+## 配置
+
+### 后端环境变量
+
+复制环境变量模板：
+
+```bash
+cp conf/.env.example conf/.env
+```
+
+编辑 `conf/.env`：
+
+```dotenv
+# ==================== 数据库 ====================
+
+# PostgreSQL 数据库密码（认证、元数据和会话持久化共用）
+POSTGRES_PASSWORD=123123
+
+# Doris 平台内部管理账号密码，用于元数据读取和权限管理
+DORIS_ADMIN_PASSWORD=123123
+
+# Doris 查询身份凭据加密密钥
+# uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+DORIS_CREDENTIAL_ENCRYPTION_KEY=
+
+# ==================== 身份认证与管理员 ====================
+
+# JWT 签名密钥，必须使用至少 32 字符的随机值
+# uv run python -c 'import secrets; print(secrets.token_urlsafe(48))'
+JWT_SECRET=
+
+# 初始管理员引导凭据（scripts/bootstrap_admin.py）
+# 用户名和邮箱可通过 CLI 覆盖；密码从环境变量读取
+ADMIN_USERNAME=123
+ADMIN_EMAIL=123@123.com
+ADMIN_PASSWORD=123123
+
+# ==================== 模型服务 ====================
+
+# DeepSeek 官方 API 密钥
+DEEPSEEK_API_KEY=
+
+# SiliconFlow 模型服务密钥
+SILICONFLOW_API_KEY=
+
+# ==================== MCP 工具 ====================
+
+# Tavily MCP 搜索服务密钥
+TAVILY_API_KEY=
+```
+
+按注释中的命令生成 Doris 凭据加密密钥和 JWT 签名密钥。
+
+### 模型配置
+
+在 [conf/app_config.yaml](conf/app_config.yaml) 中配置语言模型和向量模型，API 密钥通过 `${oc.env:变量名}` 从 `conf/.env` 或进程环境变量读取。修改后重启相关后端和 Worker 进程。
+
+**语言模型（`lm_config`）**
+
+- `models`：按配置名声明模型，`model_provider` 支持 `openai` 和 `deepseek`，其余字段为 `api_protocol`、`model`、`base_url` 和 `api_key`；`params` 用于传入推理强度等附加参数。
+- `active`：选择 `models` 中的一个配置名，作为 Planner 的默认模型。
+- `profile`：按模型实际能力填写图片输入支持（`image_inputs`）、结构化输出支持（`structured_output`）和上下文长度（`max_input_tokens`）。
+- `agent.specialists`：可为 Explorer、Analyst、Reviewer 单独指定模型配置名；填写 `default` 时跟随 `lm_config.active`。
+
+**向量模型（`embedding`）与 ES 维度**
+
+`embedding` 的 `base_url`、`api_key` 和 `model` 指定文本向量化服务，用于元数据和查询经验的语义检索。
+
+`elasticsearch.embedding_size` 必须等于向量模型实际输出的维度；它只定义 ES 索引的向量维度，不会改变模型输出。更换向量模型后需重新生成索引中的向量；如果维度变化，还需按新维度重建相关 ES 索引。
+
+### 前端代理
+
+复制前端环境变量模板：
+
+```bash
+cp ../web/.env.example ../web/.env
+```
+
+`../web/.env` 默认将 `/api` 代理到本机后端：
+
+```dotenv
+VITE_APP_PROXY=http://localhost:7000
+```
+
+后端地址变化时修改该值。
+
+## 启动
+
+### 1. 安装依赖
+
+```bash
+uv sync
+npm --prefix ../web ci
+```
+
+### 2. 启动基础服务
+
+```bash
+docker compose -f docker/compose.yml up -d
+```
+
+该命令启动 PostgreSQL、Elasticsearch、Redis 和 Doris，并在缺少 `dataagent-sandbox:latest` 时构建沙箱镜像。PostgreSQL 的 `auth`、`meta` 和 `langgraph` 数据库会在首次创建数据卷时自动初始化。
+
+查看服务状态：
+
+```bash
+docker compose -f docker/compose.yml ps
+```
+
+### 3. 准备 Doris 全量数据
+
+默认应用连接 Doris 的 `ecommerce` 数据库。`dbmock` 作为 Git 子模块固定到指定提交，其数据文件由子仓库的 Git LFS 管理。先在仓库根目录 `code` 初始化子模块并拉取数据：
+
+```bash
+cd ..
+git lfs install
+git submodule update --init
+git -C dbmock lfs pull
+```
+
+首次克隆主仓库时可添加 `--recurse-submodules` 参数。之后更新主仓库代码时，执行 `git submodule update --init` 同步子模块版本。
+
+创建 `dbmock` 配置并按指定月份生成数据：
+
+```bash
+cp dbmock/.env.example dbmock/.env
+# 将 dbmock/.env 中的 DB_PASSWORD 设置为 123123
+
+cd dbmock
+UV_PROJECT_ENVIRONMENT=.venv uv sync
+UV_PROJECT_ENVIRONMENT=.venv uv run scripts/init_db.py
+UV_PROJECT_ENVIRONMENT=.venv uv run main.py --start-month 2026-01 --end-month 2026-08
+cd ../backend
+```
+
+`dbmock/scripts/init_db.py` 会删除并重建 `DB_NAME` 指定的数据库，只能用于可重建的本地数据。生成耗时取决于月份范围、数据规模、本机资源和 Doris 负载。
+
+### 4. 创建管理员
+
+```bash
+uv run -m scripts.bootstrap_admin
+```
+
+该命令读取 `conf/.env` 中的 `ADMIN_USERNAME`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD`，可重复执行。
+
+### 5. 启动应用
+
+在四个后端根目录终端中分别启动后端、前端、Celery Worker 和 Celery Beat；每个终端先设置上述环境位置：
+
+```bash
+# 终端 1：后端
+uv run python -m dataagent.main
+
+# 终端 2：前端
+npm --prefix ../web run dev
+
+# 终端 3：Celery Worker
+uv run celery --app dataagent.engines.common.tasks.celery_app:celery_app worker -l INFO
+
+# 终端 4：Celery Beat
+uv run celery --app dataagent.engines.common.tasks.celery_app:celery_app beat -l INFO --schedule ../celerybeat-schedule
+```
+
+启动后访问：
+
+- 前端：<http://localhost:7001>
+- 后端 OpenAPI：<http://localhost:7000/docs>
+
+## 启动后页面配置
+
+使用 `conf/.env` 中配置的管理员账号登录前端，点击左下角的“后台”按钮进入“管理中心”。
+
+### 1. 元数据导入与索引同步
+
+1. 打开“元数据管理”，在“元数据 YAML 导入导出”区域选择 `conf/meta_config.yaml`。
+2. 模式选择“全量替换”，点击“执行导入”。
+3. 导入完成后，系统会自动提交字段和指标的语义索引同步任务。保持 Celery Worker 运行，等待任务完成后刷新页面，确认对应索引状态为“已同步”。
+4. 在“表元数据”区域全选数据表，点击“全量同步取值索引”，完成启用取值索引字段的首次同步。
+
+### 2. 数据库角色创建与权限分配
+
+1. 打开“Doris 角色管理”，点击“添加角色”，填写角色标识、查询用户、业务描述和资源工作组后创建角色。
+2. 选中创建的角色，在“表与列数据权限 (SELECT)”区域配置查询权限：表名留空表示授予当前数据库全部表权限；填写表名并将字段留空表示授予整表权限；同时填写表名和逗号分隔的字段表示仅授予指定字段权限。
+3. 按需配置行级策略，并可将该角色设为新用户的默认角色。
+4. 打开“用户账号管理”，添加或编辑用户，将 Doris 角色分配给需要查询数据的账号。

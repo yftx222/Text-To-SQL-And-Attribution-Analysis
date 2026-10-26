@@ -12,3 +12,13 @@ logs
 node_modules
 celerybeat-schedule*
 .deepagents/workspaces/
+
+# Local caches and temporary test directories
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+pytest-cache-files-*/
+
+# Local environment variants; keep configuration examples
+.env.*
+!.env.example

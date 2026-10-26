@@ -14,22 +14,22 @@ start:
 	$(MAKE) --no-print-directory -j4 run web worker beat
 
 run:
-	uv run main.py
+	$(MAKE) --no-print-directory -C backend run
 
 web:
 	npm --prefix web run dev
 
 worker:
-	uv run celery --app app.shared.tasks.celery_app:celery_app worker -l INFO
+	$(MAKE) --no-print-directory -C backend worker
 
 beat:
-	uv run celery --app app.shared.tasks.celery_app:celery_app beat -l INFO
+	$(MAKE) --no-print-directory -C backend beat
 
 init-db:
-	uv run scripts/init_db.py
+	$(MAKE) --no-print-directory -C backend init-db
 
 bootstrap-admin:
-	uv run -m scripts.bootstrap_admin
+	$(MAKE) --no-print-directory -C backend bootstrap-admin
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true

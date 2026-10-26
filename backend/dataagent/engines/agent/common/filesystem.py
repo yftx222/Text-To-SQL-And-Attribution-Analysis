@@ -1,0 +1,70 @@
+"""Agent 共用文件系统装配与路径交付协议。"""
+
+from collections.abc import Sequence
+from pathlib import PurePosixPath
+
+from deepagents import FilesystemMiddleware
+from deepagents.backends import CompositeBackend, FilesystemBackend
+from deepagents.backends.protocol import BackendProtocol
+from deepagents.middleware.filesystem import FilesystemPermission, FsToolName
+
+from dataagent.engines.contract.analysis import AgentType
+from dataagent.engines.contract.config import cfg
+from dataagent.engines.prompts import SKILLS_DIRECTORY, load_prompt
+from dataagent.engines.sandbox import DockerSandboxBackend
+from dataagent.engines.sandbox.contracts import SandboxReadonlyMount
+
+_AGENT_SKILLS_MOUNT_ROOT = "/skills"
+
+
+def agent_skills_mount_path(agent_type: AgentType) -> str:
+    """返回指定 Agent 的只读技能挂载路径。"""
+    return f"{_AGENT_SKILLS_MOUNT_ROOT}/{agent_type}/"
+
+
+def analyst_skill_mount() -> SandboxReadonlyMount:
+    """创建并校验 Analyst 使用的只读技能挂载。"""
+    return SandboxReadonlyMount(
+        source=SKILLS_DIRECTORY,
+        target=PurePosixPath(agent_skills_mount_path("analyst")),
+        docker_source=PurePosixPath(cfg.sandbox.skill_host_path),
+    )
+
+
+def build_agent_filesystem(
+    backend: DockerSandboxBackend,
+    *,
+    tools: Sequence[FsToolName],
+    skill_mount: SandboxReadonlyMount | None = None,
+) -> tuple[BackendProtocol, FilesystemMiddleware]:
+    """按角色工具范围创建文件系统，并挂载可选的只读技能。"""
+    workspace_dir = backend.workspace_dir
+    permissions: list[FilesystemPermission] = []
+    routes: dict[str, BackendProtocol] = {}
+    if skill_mount is not None:
+        mount_path = f"{skill_mount.target}/"
+        routes[mount_path] = FilesystemBackend(
+            root_dir=skill_mount.source,
+            virtual_mode=True,
+        )
+        permissions.append(
+            FilesystemPermission(
+                operations=["write"],
+                paths=[f"{mount_path}**"],
+                mode="deny",
+            )
+        )
+    resolved_backend = CompositeBackend(
+        default=backend,
+        routes=routes,
+        artifacts_root=workspace_dir,
+    )
+    filesystem = FilesystemMiddleware(
+        backend=resolved_backend,
+        system_prompt=load_prompt("filesystem").format(
+            workspace_dir=workspace_dir,
+        ),
+        tools=list(tools),
+        _permissions=permissions,
+    )
+    return resolved_backend, filesystem

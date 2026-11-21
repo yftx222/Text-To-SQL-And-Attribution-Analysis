@@ -30,6 +30,7 @@ class PostgresAdvisoryLocks:
             min_size=1,
             max_size=12,
             open=False,
+            check=AsyncConnectionPool.check_connection,
             kwargs={
                 "autocommit": True,
                 "prepare_threshold": 0,

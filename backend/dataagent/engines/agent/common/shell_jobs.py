@@ -61,7 +61,7 @@ class _ShellJobRecord:
 
 
 class ShellJobResult(BaseModel):
-    """已脱离前台的 Shell Job 当前或最终状态。"""
+    """Shell Job 当前或最终状态。"""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -122,8 +122,8 @@ class ShellJobRuntime:
         self._cleanup_lock = asyncio.Lock()
         self._closing = False
 
-    async def start(self, command: str) -> str | ShellJobResult:
-        """启动命令，前台结束返回输出，超时后发布后台任务。"""
+    async def start(self, command: str) -> ShellJobResult:
+        """启动命令，前台结束返回终态，超时后发布后台任务。"""
         with self._lock:
             if self._closing:
                 raise RuntimeError("Shell Job Runtime 正在关闭")
@@ -158,9 +158,7 @@ class ShellJobRuntime:
                             return self._result(record)
 
             with self._lock:
-                foreground_output = self._foreground_output(record)
-            await self._discard_foreground(record)
-            return foreground_output
+                return self._result(record)
         except asyncio.CancelledError:
             with self._lock:
                 if not record.done.is_set():
@@ -183,9 +181,9 @@ class ShellJobRuntime:
         *,
         wait_seconds: float = 0,
     ) -> ShellJobResult | ShellJobError:
-        """查看后台任务；终态结果只允许一个调用方消费。"""
+        """查看后台任务；终态结果可在当前 Run 内重复读取。"""
         with self._lock:
-            record = self._available_record(job_id)
+            record = self._records.get(job_id)
             if record is None:
                 return self._not_found(job_id)
             is_terminal = record.status in _TERMINAL_STATUSES
@@ -196,18 +194,17 @@ class ShellJobRuntime:
                     timeout=wait_seconds,
                 )
         with self._lock:
-            if self._available_record(job_id) is not record:
+            if self._records.get(job_id) is not record:
                 return self._not_found(job_id)
             if record.status in _TERMINAL_STATUSES:
                 record.consumed = True
             return self._result(record)
 
     async def cancel(self, job_id: str) -> ShellJobResult | ShellJobError:
-        """取消后台任务；返回终态时消费该任务。"""
+        """取消后台任务；返回终态后从待处理列表移除。"""
         return await self._cancel(
             job_id,
             consume_terminal=True,
-            require_detached=True,
         )
 
     async def cleanup(self) -> None:
@@ -230,7 +227,6 @@ class ShellJobRuntime:
                         self._cancel(
                             job_id,
                             consume_terminal=False,
-                            require_detached=False,
                         )
                         for job_id in active_ids
                     ),
@@ -296,6 +292,7 @@ class ShellJobRuntime:
             output_path=record.output_path,
             output_truncated=record.output_truncated,
             output_inline_truncated=record.output_inline_truncated,
+            output=record.output,
             error=record.error,
         )
 
@@ -313,31 +310,6 @@ class ShellJobRuntime:
             output_path=record.output_path,
             output_truncated=record.output_truncated,
         )
-
-    @staticmethod
-    def _foreground_output(record: _ShellJobRecord) -> str:
-        """优先返回命令输出，缺少输出时提供错误或退出状态，截断时附带完整日志路径。"""
-        if record.output is not None:
-            output = record.output
-        elif record.error is not None:
-            output = record.error
-        elif record.exit_code not in (None, 0):
-            output = f"Shell 命令以退出码 {record.exit_code} 结束"
-        elif record.status != "completed":
-            output = f"Shell 命令未完成: {record.status}"
-        else:
-            output = ""
-        if not record.output_inline_truncated:
-            return output
-        separator = "" if not output or output.endswith("\n") else "\n"
-        return f"{output}{separator}详细输出文件: {record.output_path}"
-
-    def _available_record(self, job_id: str) -> _ShellJobRecord | None:
-        """返回可由模型管理的后台任务；调用方必须持有 Registry 锁。"""
-        record = self._records.get(job_id)
-        if record is None or not record.detached or record.consumed:
-            return None
-        return record
 
     async def _monitor(self, record: _ShellJobRecord) -> None:
         """持有独立监控任务并把 Backend 结果提交为单一终态。"""
@@ -408,23 +380,6 @@ class ShellJobRuntime:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _discard_foreground(self, record: _ShellJobRecord) -> None:
-        """清理不公开的前台命令临时文件和内部记录。"""
-        try:
-            await self._executor.acleanup(
-                record.job_id,
-                remove_log=not record.output_inline_truncated,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "清理前台 Shell 命令临时文件失败: "
-                f"job_id={record.job_id}, error={type(exc).__name__}"
-            )
-        finally:
-            with self._lock:
-                if self._records.get(record.job_id) is record:
-                    self._records.pop(record.job_id)
-
     def _not_found(self, job_id: str) -> ShellJobError:
         """返回当前 Run 范围内的任务缺失结果。"""
         return ShellJobError(
@@ -437,24 +392,15 @@ class ShellJobRuntime:
         job_id: str,
         *,
         consume_terminal: bool,
-        require_detached: bool,
     ) -> ShellJobResult | ShellJobError:
         """串行提交一次进程组取消请求并处理自然结束竞态。"""
         with self._lock:
-            record = (
-                self._available_record(job_id)
-                if require_detached
-                else self._records.get(job_id)
-            )
+            record = self._records.get(job_id)
             if record is None:
                 return self._not_found(job_id)
         async with record.cancel_lock:
             with self._lock:
-                available = (
-                    self._available_record(job_id)
-                    if require_detached
-                    else self._records.get(job_id)
-                )
+                available = self._records.get(job_id)
                 if available is not record:
                     return self._not_found(job_id)
                 if record.status in _TERMINAL_STATUSES:
@@ -511,7 +457,7 @@ class ShellJobRuntime:
             if caller_cancelled:
                 raise asyncio.CancelledError
         with self._lock:
-            if require_detached and self._available_record(job_id) is not record:
+            if self._records.get(job_id) is not record:
                 return self._not_found(job_id)
             if record.status in _TERMINAL_STATUSES and consume_terminal:
                 record.consumed = True

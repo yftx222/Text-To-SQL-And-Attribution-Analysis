@@ -37,6 +37,7 @@ class _State(TypedDict, total=False):
     messages: Annotated[
         list, DeltaChannel(cast(Any, _messages_delta_reducer), snapshot_frequency=2)
     ]
+    current_delegation_id: str
     delegation_records: Annotated[dict, operator.or_]
 
 
@@ -80,6 +81,10 @@ class CheckpointStateReaderTest(unittest.IsolatedAsyncioTestCase):
             delta_history.assert_not_awaited()
         actual = await self.reader.read(config)
         self.assertCountEqual(actual.next_nodes, expected.next)
+        self.assertEqual(
+            actual.values.get("current_delegation_id"),
+            expected.values.get("current_delegation_id"),
+        )
         for channel in ("messages", "delegation_records"):
             self.assertEqual(
                 actual.values.get(channel, [] if channel == "messages" else {}),
@@ -105,7 +110,11 @@ class CheckpointStateReaderTest(unittest.IsolatedAsyncioTestCase):
         graph.add_edge("tools", END)
         compiled = graph.compile(checkpointer=self.saver, interrupt_before=["tools"])
         await compiled.ainvoke(
-            {"messages": [HumanMessage(id="human", content="hello")]}, self.config
+            {
+                "messages": [HumanMessage(id="human", content="hello")],
+                "current_delegation_id": "probe",
+            },
+            self.config,
         )
         state = await self.assert_matches(compiled)
         self.assertEqual(state.next_nodes, ("tools",))

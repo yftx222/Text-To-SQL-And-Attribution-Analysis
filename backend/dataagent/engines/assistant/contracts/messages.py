@@ -86,6 +86,7 @@ class Attachment(BaseModel):
     f_path: str = Field(..., description="工作区内的文件路径")
     media_type: str | None = Field(default=None, description="附件媒体类型")
     description: str | None = Field(default=None, description="附件说明")
+    delivery_status: Literal["draft", "needs_revision", "verified"] | None = None
 
 
 class AttachmentReference(BaseModel):

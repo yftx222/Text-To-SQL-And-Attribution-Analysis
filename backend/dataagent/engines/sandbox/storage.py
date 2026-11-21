@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import posixpath
+import re
 import tarfile
 import tempfile
 import time
@@ -12,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, BinaryIO
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from docker.errors import NotFound
 from docker.models.containers import Container
@@ -119,6 +120,59 @@ class SandboxStorage:
             buffer.seek(0)
             if not container.put_archive(base_path, buffer):
                 raise OSError(f"写入 Docker 归档失败: {base_path}")
+
+    def freeze_bytes(
+        self,
+        container: Container,
+        conversation_id: UUID,
+        gid: int,
+        name: str,
+        content: bytes,
+        execution_id: UUID | None = None,
+    ) -> str:
+        """把单次读取的字节保存到 root 持有的会话目录，允许会话内只读共享。"""
+        return self.freeze_stream(
+            container, conversation_id, gid, name, io.BytesIO(content), execution_id
+        )
+
+    def freeze_stream(
+        self,
+        container: Container,
+        conversation_id: UUID,
+        gid: int,
+        name: str,
+        source: BinaryIO,
+        execution_id: UUID | None = None,
+    ) -> str:
+        """在大小限额内以流式归档发布固定字节。"""
+        suffix = PurePosixPath(name).suffix.lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,12}", suffix):
+            raise SandboxPathError(name)
+        source.seek(0, io.SEEK_END)
+        size = source.tell()
+        if size > self._max_file_bytes:
+            raise SandboxFileTooLargeError(name)
+        source.seek(0)
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+        source.seek(0)
+        directory = f".evidence-{conversation_id}"
+        key = f"{execution_id or uuid4()}_{digest}{suffix}"
+        self.put(
+            container,
+            SANDBOX_DATA_ROOT,
+            [(directory, 0, gid, 0o750)],
+            [(f"{directory}/{key}", 0, gid, 0o440, source, size)],
+        )
+        return f"{SANDBOX_DATA_ROOT}/{directory}/{key}"
+
+    @staticmethod
+    def _published_path(conversation_id: UUID, relative_path: str) -> str | None:
+        if not relative_path.startswith("evidence/"):
+            return None
+        name = relative_path.removeprefix("evidence/")
+        if not re.fullmatch(r"(?:[0-9a-f-]{36}_)?[0-9a-f]{64}\.[a-z0-9]{1,12}", name):
+            raise SandboxPathError(relative_path)
+        return f"{SANDBOX_DATA_ROOT}/.evidence-{conversation_id}/{name}"
 
     def ensure_workspace(
         self,
@@ -373,6 +427,16 @@ class SandboxStorage:
         relative_path: str,
     ) -> bytes:
         """下载并校验会话文件。"""
+        published = self._published_path(conversation_id, relative_path)
+        if published:
+            content, member = self.read_file(container, published, self._max_file_bytes)
+            if (
+                member.uid != 0
+                or hashlib.sha256(content).hexdigest()
+                != PurePosixPath(published).stem.rsplit("_", 1)[-1]
+            ):
+                raise OSError("固定产物摘要不匹配")
+            return content
         registry = self._load_registry(container)
         conversation_uid = self._existing_workspace_uid(
             container, conversation_id, registry
@@ -405,6 +469,15 @@ class SandboxStorage:
         relative_path: str,
     ) -> bool:
         """检查路径是否为当前会话可下载的普通文件。"""
+        published = self._published_path(conversation_id, relative_path)
+        if published:
+            member = self.inspect_path(container, published)
+            return (
+                member is not None
+                and member.isreg()
+                and member.uid == 0
+                and member.size <= self._max_file_bytes
+            )
         target = self._accessible_file(container, conversation_id, relative_path)
         return target is not None and target.size <= self._max_file_bytes
 
@@ -457,6 +530,7 @@ class SandboxStorage:
                 "--",
                 f"{SANDBOX_DATA_ROOT}/{conversation_id}",
                 posixpath.join(SANDBOX_STAGING_ROOT, str(conversation_id)),
+                f"{SANDBOX_DATA_ROOT}/.evidence-{conversation_id}",
             ],
             user="0",
             privileged=True,

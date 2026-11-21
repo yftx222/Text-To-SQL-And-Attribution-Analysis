@@ -1,10 +1,12 @@
 """查询校验、执行和经验检索的公开值对象。"""
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from dataagent.engines.contract.doris import DORIS_WORKLOAD_GROUP_PATTERN
 
@@ -125,6 +127,11 @@ class AnalysisQueryResult(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    semantic_validation_status: Literal["not_applied"] = "not_applied"
+    audit_status: Literal["unrecorded", "missing", "committed"] = "unrecorded"
+    index_status: Literal["not_requested", "queued", "retry_pending"] = "not_requested"
+    execution_id: UUID
+    sha256: str
     path: str
     columns: list[QueryResultColumn]
     row_count: int
@@ -151,6 +158,9 @@ class QueryExperienceRecallResult(BaseModel):
 
     id: UUID
     purpose: str
+    execution_id: UUID | None = None
+    metric: str | None = None
+    data_scope: str | None = None
     sql_template: str
     assets: list[QueryAssetSnapshot]
 
@@ -173,3 +183,59 @@ class QueryExecutionScope:
     analysis_id: str
     agent_type: str
     session_id: str
+
+
+Output = Literal["event_pairs", "devices", "customers", "summary", "evidence"]
+ALL_OUTPUTS: tuple[Output, ...] = (
+    "event_pairs",
+    "devices",
+    "customers",
+    "summary",
+    "evidence",
+)
+
+
+class SemanticQueryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    operation: Literal["trace_recurrent_faults"]
+    window_start: AwareDatetime
+    window_end: AwareDatetime = Field(
+        description="排他的结束瞬间，以次日零点表示包含整个末日"
+    )
+    device_ids: tuple[str, ...] = Field(default=(), max_length=500)
+    customer_ids: tuple[str, ...] = Field(default=(), max_length=500)
+    outputs: tuple[Output, ...] = Field(default=ALL_OUTPUTS, min_length=1)
+    as_of: AwareDatetime | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if self.as_of is not None:
+            raise ValueError("AS_OF_UNSUPPORTED")
+        if self.window_start >= self.window_end:
+            raise ValueError("请求时间窗口必须非空")
+        if any(not v.strip() for v in (*self.device_ids, *self.customer_ids)):
+            raise ValueError("设备和客户编号不能为空")
+        return self
+
+
+class SemanticMonthRequest(BaseModel):
+    """完整自然月，服务端按业务时区生成左闭右开的月份窗口。"""
+
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["trace_recurrent_faults"]
+    month: str = Field(
+        pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$", description="自然月，例如 2026-10"
+    )
+    device_ids: tuple[str, ...] = Field(default=(), max_length=500)
+    customer_ids: tuple[str, ...] = Field(default=(), max_length=500)
+    outputs: tuple[Output, ...] = Field(default=ALL_OUTPUTS, min_length=1)
+    as_of: AwareDatetime | None = None
+
+    def resolve(self) -> SemanticQueryRequest:
+        year, month = map(int, self.month.split("-"))
+        tz = ZoneInfo("Asia/Shanghai")
+        start = datetime(year, month, 1, tzinfo=tz)
+        end = datetime(year + int(month == 12), month % 12 + 1, 1, tzinfo=tz)
+        return SemanticQueryRequest(
+            **self.model_dump(exclude={"month"}), window_start=start, window_end=end
+        )

@@ -6,6 +6,7 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from dataagent.engines.assistant.repositories.checkpoint import PostgresCheckpointStore
@@ -17,10 +18,12 @@ from dataagent.engines.assistant.sessions.identity import (
     get_thread_id,
 )
 from dataagent.engines.infra.postgres_advisory_locks import PostgresAdvisoryLocks
-from dataagent.engines.orchestrator import (
-    ConversationAgentRuntime,
-    ConversationAgentRuntimeFactory,
-)
+
+if TYPE_CHECKING:
+    from dataagent.engines.orchestrator import (
+        ConversationAgentRuntime,
+        ConversationAgentRuntimeFactory,
+    )
 
 type ConversationKey = tuple[int, UUID]
 

@@ -35,10 +35,40 @@ describe("chat message display and turn grouping", () => {
     expect(getConversationExecutionStatus("conv-1", messages, false)).toBe("interrupted");
   });
 
+  test("puts a verified file in the final response once after a retried publication", () => {
+    const file = { f_path: "evidence/orders.csv", delivery_status: "verified" as const };
+    const receipt = (id: string): MessageResponse => ({
+      role: "tool", parts: [{ type: "tool_result", name: "publish_artifact", tool_call_id: id, content: "{}" }],
+      attachments: [file],
+    });
+    const messages: MessageResponse[] = [
+      receipt("a"), receipt("b"),
+      {role: "assistant", parts: [{type: "text", text: "206 笔"}], attachments: [{ f_path: file.f_path }]},
+    ];
+    const [turn] = groupDisplayItemsIntoTurns(buildDisplayItems("conv", messages, false));
+    expect(turn.finalItem?.message.attachments).toEqual([file]);
+  });
+
+  test("keeps a rejected file out of the final answer even after an earlier verified turn", () => {
+    const file = { f_path: "evidence/orders.csv" };
+    const messages: MessageResponse[] = [
+      { role: "tool", parts: [{ type: "tool_result", name: "publish_artifact", tool_call_id: "a", content: "{}" }], attachments: [{ ...file, delivery_status: "verified" }] },
+      { role: "assistant", parts: [{ type: "text", text: "首次结果" }] },
+      { role: "user", parts: [{ type: "text", text: "换个口径" }] },
+      { role: "tool", parts: [{ type: "tool_result", name: "publish_artifact", tool_call_id: "b", content: '{"status":"needs_revision"}' }] },
+      { role: "assistant", parts: [{ type: "text", text: "发布待修补" }], attachments: [file, { f_path: "sessions/copy.csv", delivery_status: "draft" }] },
+    ];
+    const [first, second] = groupDisplayItemsIntoTurns(buildDisplayItems("conv", messages, false));
+    expect(first.finalItem?.message.attachments).toHaveLength(1);
+    expect(second.finalItem?.message.attachments).toBeNull();
+  });
+
   test("detects explicit tool error status", () => {
     expect(getToolResultStatus('{"status":"failed"}')).toBe("failed");
     expect(isToolResultFailure('{"status":"error","message":"failed"}')).toBe(true);
     expect(isToolResultFailure('{"status":"failed"}')).toBe(true);
+    expect(isToolResultFailure('{"status":"needs_revision"}')).toBe(true);
+    expect(isToolResultFailure('{"status":"blocked"}')).toBe(true);
     expect(isToolResultFailure('{"status":"completed"}')).toBe(false);
     expect(isToolResultFailure("plain text error")).toBe(false);
     expect(isToolResultFailure(undefined)).toBe(false);

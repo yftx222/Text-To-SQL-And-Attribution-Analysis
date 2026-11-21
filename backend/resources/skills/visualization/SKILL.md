@@ -5,6 +5,16 @@ description: 将已验证的分析证据制作成静态图表与自包含 HTML �
 
 # 图表与报告制作
 
+## 两期金额对比简报
+
+若证据已汇总为每组一行、两期各一列，直接使用沙箱挂载的 Python 脚本。先读 CSV 表头，确认前后期方向与分组列。把下例的占位文字替换为本次实际值：
+
+```bash
+python /skills/analyst/visualization/compare_amounts.py --csv '固定CSV路径' --output '报告.html' --group '分组列' --before '上期金额列' --after '本期金额列' --before-label '上期实际日期' --after-label '本期实际日期' --metric '指标名' --unit '元' --source-note '实际来源表、金额口径与数据范围' --title '报告标题'
+```
+
+若 CSV 自带全站合计行，加 `--total-label '合计行的分组值'`，避免重复计数。脚本核对合计并从同一数据生成金额变化、证据表和内嵌图；同时保存同名 PNG 供 `view_image(f_path=...)` 检查。使用已安装的工具进行验收；沙箱缺少浏览器时，核对图片、表格、数字和内嵌资源后说明页面预览限制，即可固定 HTML。
+
 ## 从证据组织内容
 
 - 先核对证据表的口径、单位、时间窗口、样本量和排序，再绘图；不填入未经计算的数字或预设业务结论。

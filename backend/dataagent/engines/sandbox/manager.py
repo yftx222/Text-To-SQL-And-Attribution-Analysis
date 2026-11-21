@@ -157,16 +157,55 @@ class DockerSandboxManager:
         content: BinaryIO,
         *,
         session_scope: SandboxSessionScope,
+        execution_id: UUID | None = None,
     ) -> str:
         """在指定 Session 内写入产物并返回绝对路径。"""
         artifact = resolve_artifact_path(path, conversation_id, session_scope)
-        await self._upload_normalized_file(
-            user_id,
-            conversation_id,
-            artifact.relative_path,
-            content,
-        )
-        return artifact.path
+        await self.init()
+
+        def publish() -> str:
+            with (
+                self._ownership.conversation_maintenance(user_id, conversation_id),
+                self._ownership.user_mutation(user_id),
+            ):
+                self._ownership.assert_available(user_id, conversation_id)
+                container = self._runtime.get_or_create_storage(user_id)
+                gid = self._storage.ensure_workspace(container, conversation_id)
+                return self._storage.freeze_stream(
+                    container,
+                    conversation_id,
+                    gid,
+                    artifact.path,
+                    content,
+                    execution_id,
+                )
+
+        result = await asyncio.to_thread(publish)
+        await asyncio.to_thread(self._runtime.touch, user_id)
+        return result
+
+    async def freeze_attachment(
+        self, user_id: int, conversation_id: UUID, path: str
+    ) -> str:
+        """在用户回合进入检查点前固定图片，继续使用现有下载权限检查。"""
+        attachment = resolve_attachment_path(path, conversation_id)
+        await self.init()
+
+        def freeze() -> str:
+            with self._ownership.user_mutation(user_id):
+                container = self._runtime.get_existing(user_id)
+                if container is None:
+                    raise FileNotFoundError(path)
+                data = self._storage.download_file(
+                    container, conversation_id, attachment.relative_path
+                )
+                gid = self._storage.ensure_workspace(container, conversation_id)
+                version = self._storage.freeze_bytes(
+                    container, conversation_id, gid, attachment.path, data
+                )
+                return resolve_artifact_path(version, conversation_id).relative_path
+
+        return await asyncio.to_thread(freeze)
 
     async def upload_user_attachment(
         self,

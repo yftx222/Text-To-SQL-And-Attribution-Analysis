@@ -1,5 +1,9 @@
-from fastapi import FastAPI
+from hmac import compare_digest
+import os
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 from dataagent.app.exceptions.exception_handlers import register_exception_handlers
 from dataagent.app.middleware import trace
@@ -12,6 +16,7 @@ from dataagent.app.routers.query import router as query_experience_admin_router
 from dataagent.app.routers.tasks import task_router
 from dataagent.app.schemas.problem import ProblemDetails
 from dataagent.app.services.lifecycle import lifespan
+from dataagent.engines.common.observability import run_metrics
 from dataagent.engines.common.observability.log import setup_logger
 from dataagent.engines.contract.config import cfg
 
@@ -50,6 +55,17 @@ def _register_routes(app: FastAPI) -> None:
     )
     app.include_router(meta_router, prefix="/api/v1/meta")
     app.include_router(task_router, prefix="/api/v1/tasks")
+    app.add_api_route("/_observability/analysis", _analysis_metrics, methods=["GET"], include_in_schema=False)
+
+
+async def _analysis_metrics(request: Request) -> PlainTextResponse:
+    token = os.getenv("AIOPS_HTTP_METRICS_TOKEN")
+    if not token:
+        return PlainTextResponse("", status_code=404)
+    supplied = request.headers.get("Authorization", "").encode()
+    if not compare_digest(supplied, f"Bearer {token}".encode()):
+        return PlainTextResponse("", status_code=401)
+    return PlainTextResponse(run_metrics.render(), media_type="text/plain; version=0.0.4")
 
 
 def _register_middlewares(app: FastAPI) -> None:

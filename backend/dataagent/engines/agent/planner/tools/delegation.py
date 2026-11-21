@@ -6,21 +6,25 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from loguru import logger
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from dataagent.engines.agent.common.tools.errors import tool_error
+from dataagent.engines.agent.planner.tools.delivery import DeliveryGate
 from dataagent.engines.agent.specialist.invoker import DelegationExecutor
 from dataagent.engines.assistant.contracts import (
     DelegationRequest,
     DeleteSessionRequest,
     ListSessionsRequest,
 )
+from dataagent.engines.assistant.contracts.sessions import TaskInput
 from dataagent.engines.assistant.sessions.management import AgentSessionService
 from dataagent.engines.contract.analysis import AgentType
 
 
 def create_delegation_tools(
-    service: AgentSessionService, executor: DelegationExecutor
+    service: AgentSessionService,
+    executor: DelegationExecutor,
+    delivery_gate: DeliveryGate | None = None,
 ) -> list[BaseTool]:
     """创建绑定当前用户会话的委派、查询和删除工具。"""
 
@@ -43,6 +47,9 @@ def create_delegation_tools(
             str,
             "交给专业 Agent 的完整目标、输入产物路径和约束",
         ],
+        inputs: list[TaskInput] | None = None,
+        acceptance: list[str] | None = None,
+        report_delivery: bool = False,
     ) -> dict[str, object]:
         """创建或恢复专业 Agent Session，返回执行状态、Session 身份和原始文本回答。"""
         request = DelegationRequest.model_construct(
@@ -50,11 +57,29 @@ def create_delegation_tools(
             agent_type=agent_type,
             session_id=session_id,
             message=message,
+            inputs=inputs or [],
+            acceptance=acceptance or [],
         )
         delegation_id = runtime.tool_call_id
         if delegation_id is None:
             raise RuntimeError("delegation 工具缺少 tool_call_id")
+        if report_delivery and not request.acceptance:
+            return {
+                "status": "needs_revision",
+                "reason": "正式报告委派缺少 acceptance。",
+                "action": "保持本次委派参数，补填具体指标、范围、产物的验收条件后再调用；本次尚未执行。",
+            }
         try:
+            if delivery_gate and agent_type in {"analyst", "reviewer"}:
+                html_task = (
+                    report_delivery
+                    or any(ref.path.lower().endswith(".html") for ref in request.inputs)
+                    or any("html" in text.lower() for text in request.acceptance)
+                )
+                if html_task and (
+                    issue := await delivery_gate.check_report_sources(request)
+                ):
+                    return issue
             result = await executor.execute_delegation(
                 request,
                 cast(RunnableConfig, runtime.config),
@@ -64,7 +89,42 @@ def create_delegation_tools(
         except Exception as exc:  # noqa: BLE001
             logger.exception("执行专业 Agent 委派失败")
             return tool_error("专业 Agent 委派失败", exc, code="delegation_failed")
-        return result.model_dump(mode="json")
+        response = result.model_dump(mode="json")
+        if (
+            agent_type == "explorer"
+            and result.delegation_id
+            and result.outcome
+            and result.outcome.verdict == "passed"
+        ):
+            response["query_inputs"] = [
+                TaskInput(
+                    agent_type="explorer",
+                    session_id=session_id,
+                    delegation_id=result.delegation_id,
+                    path=path,
+                ).model_dump(mode="json")
+                for path in result.query_outputs
+                if request.acceptance and path in result.outcome.evidence
+            ]
+            if not request.acceptance:
+                response["report_source_issue"] = (
+                    "此委派没有 acceptance。若需正式交付，在原 Explorer Session 重新委派并显式填写验收条件，取得该轮登记的原始查询证据。切换本轮 CSV 路径不能补齐验收。"
+                )
+        if (
+            agent_type == "reviewer"
+            and result.status == "completed"
+            and result.outcome
+            and result.outcome.verdict == "passed"
+            and request.inputs
+            and (target := request.inputs[0]).agent_type == "analyst"
+            and target.path.lower().endswith(".html")
+            and target.path in result.outcome.evidence
+        ):
+            response["publish_artifact_args"] = {
+                "analysis_id": analysis_id,
+                "target": target.model_dump(mode="json"),
+            }
+        return response
 
     @tool("list_sessions", args_schema=ListSessionsRequest)
     async def list_sessions(
@@ -107,4 +167,7 @@ class _DelegationToolRequest(DelegationRequest):
     """框架注入运行时；业务请求字段及约束继承自 DelegationRequest。"""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    report_delivery: bool = Field(
+        False, description="正式报告的 Explorer、Analyst、Reviewer 委派均设为 true，并填写 acceptance；生成或复核前核对查询来源。"
+    )
     runtime: ToolRuntime

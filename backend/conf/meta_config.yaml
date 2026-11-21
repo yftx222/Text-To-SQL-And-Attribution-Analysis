@@ -5176,10 +5176,12 @@ metrics:
       - 下单金额
       - 成交总额
   - name: 有效GMV
-    description: 按 order_id 取 event_seq_no 最大的最终状态，排除 CANCELLED 后汇总订单明细应收金额。
+    description: 统计周期内创建的订单明细；先只保留 event_time 小于周期结束上界的订单状态事件，再按 order_id 取 event_seq_no 最大的期末状态。排除截至期末已取消的订单，汇总 receivable_amount。期后才取消的订单保留。
     relevant_columns:
       - t_name: dwd_trade_order_detail_di
         c_name: order_id
+      - t_name: dwd_trade_order_detail_di
+        c_name: order_create_time
       - t_name: dwd_trade_order_detail_di
         c_name: receivable_amount
       - t_name: dwd_trade_order_status_event_di
@@ -5207,10 +5209,13 @@ metrics:
       - 销售额
       - 商品金额
   - name: 实付金额
-    description: 按 pay_detail_id 取 event_seq_no 最大的最终状态，仅汇总 SUCCESS 支付尝试的订单明细分摊金额。
+    description: 以支付请求时间归属统计期。先按 event_time 小于统计期结束上界过滤支付事件，再按 pay_detail_id 取 event_seq_no 最大的期末状态；仅汇总期末已为 SUCCESS 的尝试所对应的
+      allocated_pay_amount。
     relevant_columns:
       - t_name: dwd_trade_pay_order_detail_di
         c_name: allocated_pay_amount
+      - t_name: dwd_trade_pay_order_detail_di
+        c_name: pay_request_time
       - t_name: dwd_trade_pay_order_detail_di
         c_name: pay_detail_id
       - t_name: dwd_trade_pay_status_event_di
@@ -5229,14 +5234,20 @@ metrics:
       - 支付金额
       - 实付GMV
   - name: 净支付金额
-    description: 最终状态为 SUCCESS 的实付金额减去最终打款状态为 SUCCESS 的退款金额，两侧分别聚合后相减。
+    description: 统计期内发起且截至期末已成功的支付分摊金额，减去同期发起且截至期末已成功的退款打款金额。支付按 pay_request_time、退款按 refund_pay_request_time 归期；分别在 event_time
+      小于期末上界的事件中按尝试 ID 取最大 event_seq_no，再筛 SUCCESS。两侧单独聚合为一行：实付 = COALESCE(SUM(allocated_pay_amount), 0)，退款 = COALESCE(SUM(refund_amount),
+      0)，最后用实付减退款。即使一侧没有成功记录也要返回金额，例如仅有成功支付时净额等于实付。
     relevant_columns:
       - t_name: dwd_trade_pay_order_detail_di
         c_name: allocated_pay_amount
+      - t_name: dwd_trade_pay_order_detail_di
+        c_name: pay_request_time
       - t_name: dwd_trade_pay_status_event_di
         c_name: after_pay_status
       - t_name: dwd_trade_refund_pay_detail_di
         c_name: refund_amount
+      - t_name: dwd_trade_refund_pay_detail_di
+        c_name: refund_pay_request_time
       - t_name: dwd_trade_refund_pay_status_event_di
         c_name: after_refund_pay_status
       - t_name: dwd_trade_pay_order_detail_di
@@ -5369,7 +5380,8 @@ metrics:
     alias:
       - 支付UV
   - name: 支付成功率
-    description: 按 pay_detail_id 取 event_seq_no 最大的最终状态，SUCCESS 支付尝试数除以全部支付尝试数。
+    description: 按请求发起时间选出查询周期内的支付尝试，分母按 pay_detail_id 去重。分子只看截止期末已经发生的状态事件（event_time 小于下一周期起点），再按每笔尝试最大的 event_seq_no 取末态，计数末态为
+      SUCCESS 的尝试。没有状态事件的尝试仍计入分母。
     relevant_columns:
       - t_name: dwd_trade_pay_detail_di
         c_name: pay_detail_id
@@ -5912,10 +5924,13 @@ metrics:
     alias:
       - 成功退款单数
   - name: 退款成功金额
-    description: 按 refund_pay_detail_id 取最终状态，仅汇总状态为 SUCCESS 的退款打款金额。
+    description: 以退款打款请求时间归属统计期。先按 event_time 小于统计期结束上界过滤打款事件，再按 refund_pay_detail_id 取 event_seq_no 最大的期末状态，仅汇总期末已为 SUCCESS
+      的 refund_amount。无成功打款计 0。
     relevant_columns:
       - t_name: dwd_trade_refund_pay_detail_di
         c_name: refund_amount
+      - t_name: dwd_trade_refund_pay_detail_di
+        c_name: refund_pay_request_time
       - t_name: dwd_trade_refund_pay_detail_di
         c_name: refund_pay_detail_id
       - t_name: dwd_trade_refund_pay_status_event_di
@@ -6448,7 +6463,8 @@ metrics:
     alias:
       - 有效商品款数
   - name: 在售SKU数
-    description: 当前有效 SKU 维度中状态为在售的去重 SKU 数。
+    description: 按指定时点有效、未删除且在售的 SKU 版本，对真实 sku_id（排除未知成员 0）去重。历史期末取下一周期起点之前仍有效的版本：effective_start_time < 下一周期起点，effective_end_time
+      >= 下一周期起点或为空。即使之后版本已变更，仍使用当时有效的版本；is_current 仅用于查询当前时点。
     relevant_columns:
       - t_name: dim_sku_info_zip
         c_name: sku_id
@@ -6488,10 +6504,13 @@ metrics:
     alias:
       - 有销量SKU数
   - name: SKU动销率
-    description: 动销 SKU 数除以查询周期内在售 SKU 数。
+    description: 分子按查询周期内的下单明细统计；对每单先取期末之前发生的最后一次状态（按 event_seq_no），剔除已取消订单，再按 sku_id 汇总 sku_qty，计数销量大于零的 SKU。分母为周期内曾在售的去重
+      sku_id：未删除且在售的版本满足 effective_start_time < 周期结束上界，且 effective_end_time > 周期起点（无失效时间视为仍有效）。按版本区间重叠判断，包含期内下架的 SKU。
     relevant_columns:
       - t_name: dwd_trade_order_detail_di
         c_name: sku_id
+      - t_name: dwd_trade_order_detail_di
+        c_name: sku_qty
       - t_name: dwd_trade_order_status_event_di
         c_name: after_order_status
       - t_name: dim_sku_info_zip

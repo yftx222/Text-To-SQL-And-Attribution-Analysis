@@ -64,6 +64,8 @@ class SandboxExecution:
             str(self.execution_uid),
         )
         self.max_file_bytes = sandbox_config.max_file_bytes
+        self.shell_timeout_seconds = sandbox_config.shell_timeout_seconds
+        self.max_user_storage_bytes = sandbox_config.max_user_storage_bytes
         self._ownership = ownership
         self._runtime = runtime
         self._operation_local = threading.local()

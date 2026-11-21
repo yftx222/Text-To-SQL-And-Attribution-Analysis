@@ -35,6 +35,7 @@ from dataagent.engines.sandbox.execution import SandboxExecution
 from dataagent.engines.sandbox.paths import resolve_sandbox_path
 from dataagent.engines.sandbox.scripts import _COMMIT_UPLOAD_SCRIPT, _LARGE_EDIT_SCRIPT
 from dataagent.engines.sandbox.shell_runner import DockerShellJobRunner
+from dataagent.engines.sandbox.storage import SandboxStorage
 
 _INLINE_OUTPUT_BYTES = 80_000
 _OUTPUT_TRUNCATION_MARKER = b"\n...[middle output truncated]...\n"
@@ -62,6 +63,17 @@ class DockerSandboxBackend(BaseSandbox):
     def conversation_dir(self) -> str:
         """获取当前 Conversation 在容器中的实际根目录。"""
         return self._execution.conversation_dir
+
+    def freeze_file(self, path: str) -> str:
+        """用当前 Agent 身份读取一次，并返回内容固定的产物路径。"""
+        with self._execution.operation():
+            response = self.download_files([path])[0]
+            if response.content is None or response.error:
+                raise SandboxPathError(path)
+            return SandboxStorage(self._execution.max_file_bytes).freeze_bytes(
+                self._execution.container, self._execution.conversation_id,
+                self._execution.execution_gid, path, response.content,
+            )
 
     def execute(
         self,

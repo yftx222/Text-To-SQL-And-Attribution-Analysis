@@ -94,6 +94,7 @@ class AgentSessionService:
             (summary for summary in summaries if summary is not None),
             key=lambda item: (item.analysis_id, item.agent_type, item.session_id),
         )
+        _mark_stale_inputs(sessions)
         return ListSessionsResult(analysis_id=analysis_id, sessions=sessions)
 
     async def delete_session(
@@ -109,6 +110,15 @@ class AgentSessionService:
         async with (
             self._control.lock(session_key),
         ):
+            if request.agent_type == "reviewer":
+                state = (await self._session_store.read_state(session_key)).values
+                view = SpecialistCheckpointView(state)
+                for ident in state.get("delegation_records", {}):
+                    record = view.delegation_record(ident)
+                    if record and record.task and record.task.inputs:
+                        raise ValueError(
+                            "此 Session 包含绑定产物的复核记录，请保留审核历史"
+                        )
             try:
                 checkpoint_deleted = await self._session_store.delete_checkpoint(
                     session_key
@@ -175,3 +185,25 @@ class AgentSessionService:
             agent_type=agent_type,
             session_id=session_id,
         )
+
+
+def _mark_stale_inputs(sessions: list[SessionSummary]) -> None:
+    """上游更换版本后，把状态沿实际引用传播；只修改本次查询的展示副本。"""
+    current = {(s.analysis_id, s.agent_type, s.session_id): s for s in sessions}
+    changed = True
+    while changed:
+        changed = False
+        for item in sessions:
+            if item.business_status == "stale":
+                continue
+            for ref in item.inputs:
+                source = current.get((item.analysis_id, ref.agent_type, ref.session_id))
+                if (
+                    source is None
+                    or source.delegation_id != ref.delegation_id
+                    or ref.path not in source.outputs
+                    or source.business_status == "stale"
+                ):
+                    item.business_status = "stale"
+                    changed = True
+                    break

@@ -15,20 +15,28 @@ from langgraph.graph.state import CompiledStateGraph
 from dataagent.engines.agent.common.filesystem import analyst_skill_mount
 from dataagent.engines.agent.common.graph import create_agent
 from dataagent.engines.agent.common.shell_jobs import ShellJobRuntime
+from dataagent.engines.agent.explorer.tools.ontology import ontology_tools
 from dataagent.engines.agent.explorer.tools.execute_sql import create_execute_sql_tool
 from dataagent.engines.agent.explorer.tools.mcp import get_mcp_tools
 from dataagent.engines.agent.explorer.tools.semantic_recall import (
     create_semantic_recall_tools,
 )
 from dataagent.engines.agent.planner.tools.delegation import create_delegation_tools
+from dataagent.engines.agent.planner.tools.delivery import (
+    DeliveryGate,
+    create_delivery_tool,
+)
+from dataagent.engines.agent.specialist.comparison import comparison_tool
 from dataagent.engines.agent.specialist.invoker import (
     DelegationExecutor,
     SpecialistAgentRun,
 )
+from dataagent.engines.agent.specialist.outcome import submit_task_result
 from dataagent.engines.agent.specialist.state import SpecialistAgentState
 from dataagent.engines.assistant.execution.activity import SessionActivity
 from dataagent.engines.assistant.models.session import AgentSessionKey
 from dataagent.engines.assistant.repositories.checkpoint import PostgresCheckpointStore
+from dataagent.engines.assistant.repositories.delivery import DeliveryReceiptStore
 from dataagent.engines.assistant.repositories.session import SessionCheckpointRepository
 from dataagent.engines.assistant.sessions.control import SessionControl
 from dataagent.engines.assistant.sessions.management import AgentSessionService
@@ -73,9 +81,15 @@ class ConversationAgentRuntimeFactory:
         recall: SemanticRecallService,
         query: QueryExecutionService,
         activity: SessionActivity,
+        receipts: DeliveryReceiptStore,
+        budget,
+        ontology=None,
     ) -> None:
         """保存运行时依赖，共享资源由 init 创建。"""
         self._activity = activity
+        self._receipts = receipts
+        self._budget = budget
+        self._ontology = ontology
         self._recall = recall
         self._query = query
         self._persistence = persistence
@@ -153,7 +167,17 @@ class ConversationAgentRuntimeFactory:
             user_id=user_id,
             conversation_id=conversation_id,
         )
+        gate = DeliveryGate(
+            user_id,
+            conversation_id,
+            session_store,
+            self._sandbox,
+            self._query,
+            self._receipts,
+        )
         delegation = DelegationExecutor(
+            record_review=gate.record_query_review,
+            budget=self._budget,
             build_agent=self.create_specialist,
             control=control,
             activity=self._activity,
@@ -166,10 +190,14 @@ class ConversationAgentRuntimeFactory:
         shell_jobs = ShellJobRuntime(conversation_backend.shell_jobs)
         planner = create_agent(
             name="planner",
+            allow_shell=False,
             system_prompt=load_prompt("agents/planner"),
             filesystem_tools=["read_file"],
             model=resources.planner_model,
-            tools=create_delegation_tools(session_service, delegation),
+            tools=[
+                *create_delegation_tools(session_service, delegation, gate),
+                create_delivery_tool(gate),
+            ],
             backend=conversation_backend,
             checkpointer=checkpointer,
             shell_jobs=shell_jobs,
@@ -207,15 +235,22 @@ class ConversationAgentRuntimeFactory:
         tools: list[BaseTool] = []
         if agent_type == "explorer":
             tools = [
-                *create_semantic_recall_tools(self._recall),
+                *create_semantic_recall_tools(
+                    self._recall, ontology=self._ontology, session_key=session_key
+                ),
                 create_execute_sql_tool(self._query),
                 *resources.mcp_tools,
             ]
+        elif agent_type in {"analyst", "reviewer"}:
+            tools = [comparison_tool(agent_type, backend)]
+        if self._ontology is not None:
+            tools.extend(ontology_tools(self._ontology, session_key, agent_type))
         agent = create_agent(
             name=agent_type,
+            allow_shell=agent_type in {"explorer", "analyst", "reviewer"},
             system_prompt=load_prompt(f"agents/{agent_type}"),
             model=resources.specialist_models[agent_type],
-            tools=tools,
+            tools=[*tools, submit_task_result],
             backend=backend,
             checkpointer=self._persistence.checkpointer,
             shell_jobs=shell_jobs,

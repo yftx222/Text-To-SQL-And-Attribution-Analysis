@@ -16,6 +16,7 @@ def _merge_delegation_records(
 class SpecialistAgentState(DeepAgentState):
     """增加显式 delegation 状态的专业 Agent Checkpoint。"""
 
+    current_delegation_id: str
     delegation_records: Annotated[
         dict[str, object],
         _merge_delegation_records,

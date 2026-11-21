@@ -6,6 +6,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -21,6 +22,7 @@ from dataagent.engines.assistant.errors import (
 from dataagent.engines.assistant.sessions.identity import (
     conversation_lifecycle_lock_name,
 )
+from dataagent.engines.common.observability import run_metrics
 from dataagent.engines.contract.config import cfg
 from dataagent.engines.infra.errors import AdvisoryLockBusyError
 
@@ -83,10 +85,15 @@ class ConversationRunService:
     ) -> AsyncGenerator[RunEvent]:
         """原子注册后台 Run；消息为 None 时恢复回合，返回首订阅者事件流。"""
         key = (user_id, conversation_id)
+        # 创建一个异步队列，最大容量为256，用于存储 RunEvent：一条回答、状态或错误事件
+        # 或 None事件：内部使用的“队列读取结束”标记，设置最大容量是为了防止队列无限增长导致内存占用过大
         queue: asyncio.Queue[RunEvent | None] = asyncio.Queue(
             maxsize=_SUBSCRIBER_QUEUE_LIMIT
         )
+        #取得正在执行的事件循环，给事件循环创建一个future对象，表示当前Run是否准备好，当前属于未完成状态
+        #赋值给ready创建一个新的_ConversationRun对象，表示当前会话的运行状态
         run = _ConversationRun(ready=asyncio.get_running_loop().create_future())
+        #run.subscribers 是一个集合，保存接收本轮执行事件的队列。后续 _publish() 发布事件时，会遍历 run.subscribers，向这些队列投递事件。
         run.subscribers.add(queue)
         async with self._lock:
             existing = self._runs.get(key)
@@ -187,12 +194,15 @@ class ConversationRunService:
     ) -> None:
         """执行新回合或恢复回合，并把结果发布给全部订阅者。"""
         user_id, conversation_id = key
+        started = None
+        outcome = "completed"
         try:
             # 同一后台 Task 在受理与执行期间持续持有会话生命周期锁。
             async with self._locks.advisory_lock(
                 conversation_lifecycle_lock_name(user_id, conversation_id)
             ):
                 await prepare()
+                started = perf_counter()
                 run.ready.set_result(None)
                 responses = planner_turn.run_agent_turn(
                     self._agents,
@@ -206,12 +216,16 @@ class ConversationRunService:
                 )
                 try:
                     async for event in responses:
+                        if isinstance(event, chat_schema.ChatStreamErrorEvent):
+                            outcome = "failed"
                         await self._publish(run, event)
                 finally:
                     await responses.aclose()
         except asyncio.CancelledError:
+            outcome = "cancelled"
             logger.info(f"智能体执行已停止: conversation_id={conversation_id}")
         except Exception as exc:  # noqa: BLE001
+            outcome = "failed"
             if not run.ready.done():
                 # 受理阶段的业务错误通过 ready 返回 HTTP 调用方。
                 run.ready.set_result(exc)
@@ -224,6 +238,9 @@ class ConversationRunService:
                         content="模型调用失败，请稍后重试。",
                     ),
                 )
+        finally:
+            if started is not None:
+                run_metrics.record(outcome, perf_counter() - started)
 
     async def _publish(self, run: _ConversationRun, event: RunEvent) -> None:
         """按产生顺序缓存事件并广播给所有当前订阅者。"""

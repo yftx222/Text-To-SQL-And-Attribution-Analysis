@@ -38,6 +38,7 @@ async def list_messages(
             files,
             user_id,
             conversation_id,
+            planner_reply=True,
         ):
             result.append(schema)
     return result

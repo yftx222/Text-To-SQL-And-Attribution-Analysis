@@ -65,3 +65,24 @@ class QueryExecution(QueryBase):
             "session_id",
         ),
     )
+
+
+class QueryReview(QueryBase):
+    """每次独立审核绑定一次 SQL 执行，保留被修补的旧执行。"""
+
+    __tablename__ = "query_execution_reviews"
+    execution_id: Mapped[UUID] = mapped_column(
+        ForeignKey("query_executions.id", ondelete="CASCADE"), primary_key=True
+    )
+    review_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    passed: Mapped[bool] = mapped_column(nullable=False)
+    metric: Mapped[str] = mapped_column(Text)
+    data_scope: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[list[str]] = mapped_column(JSON)
+    replaces_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("query_executions.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

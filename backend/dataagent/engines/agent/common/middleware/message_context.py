@@ -16,7 +16,13 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import AnyMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langgraph.runtime import Runtime
 from loguru import logger
 from pydantic import Field, ValidationError, field_validator
@@ -28,6 +34,7 @@ from dataagent.engines.agent.common.tools.view_image import (
     is_supported_image_path,
     supports_view_image_tool,
 )
+from dataagent.engines.agent.specialist.outcome import task_outputs
 from dataagent.engines.assistant.contracts import (
     MESSAGE_CREATED_AT_KEY,
     NonEmptyText,
@@ -99,12 +106,14 @@ class MessageContextMiddleware(AgentMiddleware[Any, Any, Any]):
         shell_jobs: ShellJobRuntime,
         *,
         working_directory: str,
+        agent_name: str = "",
     ) -> None:
         """绑定当前 Agent 的文件后端和 Shell Job Runtime。"""
         self._backend = backend
         self._conversation_dir = conversation_dir
         self._working_directory = working_directory
         self._shell_jobs = shell_jobs
+        self._agent_name = agent_name
 
     def before_model(
         self,
@@ -151,6 +160,8 @@ class MessageContextMiddleware(AgentMiddleware[Any, Any, Any]):
         handler: Callable[[ModelRequest[Any]], ModelResponse[Any]],
     ) -> ModelResponse[Any]:
         """同步读取当前需要查看的图片并投影模型请求。"""
+        if stop := self._terminal_response(request.messages):
+            return _stamp_response(stop)
         user_images, tool_images = _image_projection_options(request)
         attachment_paths, image_requests = _file_references(
             request.messages, self._conversation_dir, self._working_directory
@@ -183,6 +194,8 @@ class MessageContextMiddleware(AgentMiddleware[Any, Any, Any]):
         handler: Callable[[ModelRequest[Any]], Awaitable[ModelResponse[Any]]],
     ) -> ModelResponse[Any]:
         """异步读取当前需要查看的图片并投影模型请求。"""
+        if stop := self._terminal_response(request.messages):
+            return _stamp_response(stop)
         user_images, tool_images = _image_projection_options(request)
         attachment_paths, image_requests = _file_references(
             request.messages, self._conversation_dir, self._working_directory
@@ -208,6 +221,70 @@ class MessageContextMiddleware(AgentMiddleware[Any, Any, Any]):
         ):
             request = request.override(messages=messages)
         return _stamp_response(await handler(request))
+
+    def _terminal_response(self, messages):
+        if self._agent_name == "analyst":
+            return _submitted_report(messages)
+        return _budget_stop(messages)
+
+
+def _submitted_report(messages):
+    """已提交并固定的本轮报告可以直接交 Planner 复核，无须再等模型复述。"""
+    if not messages or not isinstance(last := messages[-1], ToolMessage):
+        return None
+    if last.name != "submit_task_result" or last.status == "error":
+        return None
+    start = next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if isinstance(messages[i], HumanMessage)
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    outcome, outputs, _ = task_outputs(messages[start + 1 :])
+    if not outcome or outcome.verdict != "passed":
+        return None
+    reports = [
+        p for p in outcome.evidence if p in outputs and p.lower().endswith(".html")
+    ]
+    if not reports:
+        return None
+    checks = [f"{k}：{v}" for k, v in outcome.checks.items()]
+    return ModelResponse(
+        result=[
+            AIMessage(content="\n".join(["Analyst 已提交报告。", *reports, *checks]))
+        ]
+    )
+
+
+def _budget_stop(messages):
+    """全部待执行委派均耗尽预算时，直接结束本回合并保留前序工具记录。"""
+    reasons = []
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        if message.name != "delegation" or not isinstance(message.content, str):
+            return None
+        try:
+            result = json.loads(message.content)
+        except ValueError:
+            return None
+        if (
+            not isinstance(result, dict)
+            or result.get("failure_code") != "budget_exhausted"
+        ):
+            return None
+        reasons.append(f"{result['analysis_id']}：{result['content']}")
+    if reasons:
+        return ModelResponse(
+            result=[
+                AIMessage(content="分析已停止。" + "。".join(dict.fromkeys(reasons)))
+            ]
+        )
+    return None
 
 
 def read_user_message_context(message: HumanMessage) -> UserMessageContext | None:
@@ -356,6 +433,14 @@ def _file_references(
                 for item in context.attachments:
                     if item.f_path not in attachments:
                         try:
+                            if item.f_path.startswith("evidence/"):
+                                root, _, identity = conversation_dir.rpartition("/")
+                                attachments[item.f_path] = resolve_sandbox_path(
+                                    item.f_path.removeprefix("evidence/"),
+                                    f"{root}/.evidence-{identity}",
+                                    allowed_root=f"{root}/.evidence-{identity}",
+                                )
+                                continue
                             attachments[item.f_path] = resolve_sandbox_path(
                                 item.f_path,
                                 conversation_dir,

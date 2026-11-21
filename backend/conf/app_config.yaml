@@ -85,6 +85,10 @@ lifecycle: # 跨存储 Conversation 和用户资源清理策略。
   user_deletion_retry_seconds: 60 # 注销失败后到下一次可领取的最短等待时间，单位为秒。
 
 query: # Agent 只读 SQL 执行和查询经验召回配置。
+  ontology_enabled: true
+  ontology_database: dataagent_mfg_service_demo
+  ontology_role_scopes:
+    dataagent_test: demo-service
   data_source: doris # SQL 查询数据源标识。
   timeout_seconds: 300 # 单条 SQL 执行超时，单位为秒。
   memory_limit_bytes: 1073741824 # 单条 SQL 在 Doris 中的内存上限，单位为字节。
@@ -106,6 +110,7 @@ sandbox: # 每用户 Docker 沙箱及其持久化数据卷配置。
   memory_limit: 1g # 基础测试单个沙箱最多使用 1GB 内存。
   nano_cpus: 1000000000 # 每个用户沙箱最多使用 1 个 CPU 核心。
   pids_limit: 256 # 单个用户容器允许的最大进程数。
+  shell_timeout_seconds: 300 # 单个模型 Shell 的总时限，包含后台运行。
   internal_command_timeout_seconds: 60 # Sandbox 内部辅助命令硬超时。
   max_file_bytes: 52428800 # 单个工作区文件上限，单位为字节。
   max_user_storage_bytes: 1073741824 # 单个用户数据卷容量上限，单位为字节。
@@ -135,6 +140,10 @@ lm_config: # 可用语言模型集合及默认模型。
 
 agent: # Planner 和 Specialist 运行时配置。
   orchestration: # 动态 Specialist 编排限制。
+    max_delegations: 24
+    max_repairs: 3
+    analysis_seconds: 1800
+    delegation_seconds: 600
     max_parallel_sessions: 1 # 基础测试串行执行专家任务，减少沙箱内存峰值。
     max_sessions: 128 # 单个 Conversation 可持久化的 Specialist Session 上限。
     max_continuations: 3 # 单个用户回合允许 Planner 自动续写的最大次数。

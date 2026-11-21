@@ -52,3 +52,7 @@ def classify_query_error(error: Exception) -> tuple[QueryExecutionStatus, str]:
     if isinstance(error, QueryResultShapeError):
         return "failed", "query_result_invalid"
     return "failed", "readonly_query_failed"
+
+
+class SemanticAuditError(RuntimeError):
+    """受控查询的执行与经验事务未能提交。"""

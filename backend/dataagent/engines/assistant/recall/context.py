@@ -38,10 +38,12 @@ class SemanticRecallContextService:
         repo: SemanticRecallPGRepo,
         authorization_filter: SemanticRecallAuthorization,
         *,
+        refresh_examples=None,
         query_experience_role_name: str | None,
         query_experience_authorization_fingerprint: str | None,
     ) -> None:
         """初始化召回管理服务。"""
+        self._refresh_examples = refresh_examples
         self._repo = repo
         self._authorization_filter = authorization_filter
         self._query_experience_role_name = query_experience_role_name
@@ -69,7 +71,7 @@ class SemanticRecallContextService:
         recalled = self._authorization_filter.filter_recall_response(response)
         response = recalled
         if previous is not None:
-            previous = self._authorize_record(previous)
+            previous = await self._authorize_record(previous)
             response = _merge_semantic_recall_responses(
                 response.recall_id,
                 previous.response,
@@ -111,7 +113,7 @@ class SemanticRecallContextService:
         )
         if record is None:
             raise SemanticQueriesNotFoundError([query])
-        return self._authorize_record(record)
+        return await self._authorize_record(record)
 
     async def list(
         self,
@@ -122,7 +124,7 @@ class SemanticRecallContextService:
     ) -> list[SemanticRecallRecord]:
         """列出会话召回记录。"""
         return [
-            self._authorize_record(record)
+            await self._authorize_record(record)
             for record in await self._repo.list(
                 user_id,
                 conversation_id,
@@ -158,7 +160,7 @@ class SemanticRecallContextService:
         current_time = now or datetime.now(UTC)
         if current_time - retrieved_at >= _QUERY_EXPERIENCE_CACHE_TTL:
             return None
-        authorized = self._authorize_record(record)
+        authorized = await self._authorize_record(record)
         return authorized.query_experiences, retrieved_at
 
     async def merge(
@@ -195,8 +197,8 @@ class SemanticRecallContextService:
                 if record is None
             ]
             raise SemanticQueriesNotFoundError(missing)
-        target_record = self._authorize_record(target_record)
-        source_record = self._authorize_record(source_record)
+        target_record = await self._authorize_record(target_record)
+        source_record = await self._authorize_record(source_record)
 
         now = datetime.now(UTC)
         merged_id = f"recall_{uuid.uuid4().hex}"
@@ -257,7 +259,7 @@ class SemanticRecallContextService:
             if record is None:
                 missing.append(deletion.query)
                 continue
-            loaded.append((deletion, self._authorize_record(record)))
+            loaded.append((deletion, await self._authorize_record(record)))
         if missing:
             raise SemanticQueriesNotFoundError(missing)
 
@@ -316,7 +318,7 @@ class SemanticRecallContextService:
             results.append(updated_record)
         return results
 
-    def _authorize_record(
+    async def _authorize_record(
         self,
         record: SemanticRecallRecord,
     ) -> SemanticRecallRecord:
@@ -327,6 +329,10 @@ class SemanticRecallContextService:
             if self._matches_query_experience_scope(record)
             else []
         )
+        if query_experiences and self._refresh_examples is not None:
+            query_experiences = await self._refresh_examples(
+                self._authorization_filter.policy, query_experiences
+            )
         return record.model_copy(
             update={
                 "response": response,

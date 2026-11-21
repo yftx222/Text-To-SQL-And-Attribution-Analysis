@@ -7,4 +7,4 @@
 - 跨 Agent 传递或交付文件必须使用完整绝对路径，因为不同 Agent 的当前工作目录可能不同。
 - 内置技能位于只读 `/skills/...`。
 - 产物使用不可变版本名，恢复或重试时递增版本后缀（如 `_v2.parquet`）；交付前确认文件存在，在正文中说明文件用途。
-- 向用户交付文件时，将文件完整绝对路径放入独占一行的 [[DATAAGENT_ARTIFACT:<absolute_path>]] 纯文本指令，不添加列表符号、代码块或其他修饰。
+- 专业 Agent 展示工作草稿时，将文件完整绝对路径放入独占一行的 [[DATAAGENT_ARTIFACT:<absolute_path>]] 纯文本指令。Planner 正式交付文件使用 publish_artifact 的成功回执。

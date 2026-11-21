@@ -1,0 +1,5 @@
+[
+  {"model":"CT-4008Tn-5V6A-164","application":"3C数码电芯测试","max_voltage_v":5,"max_current_a":6,"current_ranges":3,"source":"https://www.neware.com.cn/CT-4008Tn-5V6A"},
+  {"model":"CT-4008Q-5V100mA-124","application":"扣式电芯测试","max_voltage_v":5,"max_current_a":0.1,"current_ranges":4,"source":"https://www.neware.com.cn/5V100mA"},
+  {"model":"CT-4008Q-5V12A-204n","application":"3C数码电芯测试","max_voltage_v":5,"max_current_a":12,"current_ranges":4,"source":"https://www.neware.com.cn/CT-4008Q-5V12A"}
+]

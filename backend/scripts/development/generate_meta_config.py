@@ -940,9 +940,10 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "有效GMV",
-            "按 order_id 取 event_seq_no 最大的最终状态，排除 CANCELLED 后汇总订单明细应收金额",
+            "统计周期内创建的订单明细；先只保留 event_time 小于周期结束上界的订单状态事件，再按 order_id 取 event_seq_no 最大的期末状态。排除截至期末已取消的订单，汇总 receivable_amount。期后才取消的订单保留",
             [
                 "dwd_trade_order_detail_di.order_id",
+                "dwd_trade_order_detail_di.order_create_time",
                 "dwd_trade_order_detail_di.receivable_amount",
                 "dwd_trade_order_status_event_di.after_order_status",
                 "dwd_trade_order_status_event_di.event_time",
@@ -957,9 +958,10 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "实付金额",
-            "按 pay_detail_id 取 event_seq_no 最大的最终状态，仅汇总 SUCCESS 支付尝试的订单明细分摊金额",
+            "以支付请求时间归属统计期。先按 event_time 小于统计期结束上界过滤支付事件，再按 pay_detail_id 取 event_seq_no 最大的期末状态；仅汇总期末已为 SUCCESS 的尝试所对应的 allocated_pay_amount",
             [
                 "dwd_trade_pay_order_detail_di.allocated_pay_amount",
+                "dwd_trade_pay_order_detail_di.pay_request_time",
                 "dwd_trade_pay_order_detail_di.pay_detail_id",
                 "dwd_trade_pay_status_event_di.pay_detail_id",
                 "dwd_trade_pay_status_event_di.after_pay_status",
@@ -968,11 +970,13 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "净支付金额",
-            "最终状态为 SUCCESS 的实付金额减去最终打款状态为 SUCCESS 的退款金额，两侧分别聚合后相减",
+            "统计期内发起且截至期末已成功的支付分摊金额，减去同期发起且截至期末已成功的退款打款金额。支付按 pay_request_time、退款按 refund_pay_request_time 归期；分别在 event_time 小于期末上界的事件中按尝试 ID 取最大 event_seq_no，再筛 SUCCESS。两侧单独聚合为一行：实付 = COALESCE(SUM(allocated_pay_amount), 0)，退款 = COALESCE(SUM(refund_amount), 0)，最后用实付减退款。即使一侧没有成功记录也要返回金额，例如仅有成功支付时净额等于实付",
             [
                 "dwd_trade_pay_order_detail_di.allocated_pay_amount",
+                "dwd_trade_pay_order_detail_di.pay_request_time",
                 "dwd_trade_pay_status_event_di.after_pay_status",
                 "dwd_trade_refund_pay_detail_di.refund_amount",
+                "dwd_trade_refund_pay_detail_di.refund_pay_request_time",
                 "dwd_trade_refund_pay_status_event_di.after_refund_pay_status",
             ],
             ["净GMV", "净收入"],
@@ -1026,7 +1030,7 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "支付成功率",
-            "按 pay_detail_id 取 event_seq_no 最大的最终状态，SUCCESS 支付尝试数除以全部支付尝试数",
+            "按请求发起时间选出查询周期内的支付尝试，分母按 pay_detail_id 去重。分子只看截止期末已经发生的状态事件（event_time 小于下一周期起点），再按每笔尝试最大的 event_seq_no 取末态，计数末态为 SUCCESS 的尝试。没有状态事件的尝试仍计入分母",
             [
                 "dwd_trade_pay_detail_di.pay_detail_id",
                 "dwd_trade_pay_status_event_di.pay_detail_id",
@@ -1344,9 +1348,10 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "退款成功金额",
-            "按 refund_pay_detail_id 取最终状态，仅汇总状态为 SUCCESS 的退款打款金额",
+            "以退款打款请求时间归属统计期。先按 event_time 小于统计期结束上界过滤打款事件，再按 refund_pay_detail_id 取 event_seq_no 最大的期末状态，仅汇总期末已为 SUCCESS 的 refund_amount。无成功打款计 0",
             [
                 "dwd_trade_refund_pay_detail_di.refund_amount",
+                "dwd_trade_refund_pay_detail_di.refund_pay_request_time",
                 "dwd_trade_refund_pay_detail_di.refund_pay_detail_id",
                 "dwd_trade_refund_pay_status_event_di.after_refund_pay_status",
             ],
@@ -1700,7 +1705,7 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "在售SKU数",
-            "当前有效 SKU 维度中状态为在售的去重 SKU 数",
+            "按指定时点有效、未删除且在售的 SKU 版本，对真实 sku_id（排除未知成员 0）去重。历史期末取下一周期起点之前仍有效的版本：effective_start_time < 下一周期起点，effective_end_time >= 下一周期起点或为空。即使之后版本已变更，仍使用当时有效的版本；is_current 仅用于查询当前时点",
             [
                 "dim_sku_info_zip.sku_id",
                 "dim_sku_info_zip.sku_status",
@@ -1721,9 +1726,10 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "SKU动销率",
-            "动销 SKU 数除以查询周期内在售 SKU 数",
+            "分子按查询周期内的下单明细统计；对每单先取期末之前发生的最后一次状态（按 event_seq_no），剔除已取消订单，再按 sku_id 汇总 sku_qty，计数销量大于零的 SKU。分母为周期内曾在售的去重 sku_id：未删除且在售的版本满足 effective_start_time < 周期结束上界，且 effective_end_time > 周期起点（无失效时间视为仍有效）。按版本区间重叠判断，包含期内下架的 SKU",
             [
                 "dwd_trade_order_detail_di.sku_id",
+                "dwd_trade_order_detail_di.sku_qty",
                 "dwd_trade_order_status_event_di.after_order_status",
                 "dim_sku_info_zip.sku_id",
                 "dim_sku_info_zip.sku_status",
@@ -1742,6 +1748,8 @@ def _build_metrics() -> list[dict[str, Any]]:
 def _build_config(ddl_path: Path = DEFAULT_DDL_PATH) -> dict[str, Any]:
     """构建完整元数据配置并校验所有引用。"""
     schema = _parse_ecommerce_schema(ddl_path)
+    # 种子生成器的运行状态表不属于业务元数据。
+    schema.pop("dbmock_documents", None)
     # 生成器应在 Doris 示例结构变化时立即失败，防止静默输出缺表或遗留规则。
     if set(schema) != set(TABLE_ORDER):
         missing = sorted(set(TABLE_ORDER) - set(schema))

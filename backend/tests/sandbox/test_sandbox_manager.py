@@ -174,7 +174,9 @@ def test_init_failure_closes_client_created_before_reconcile() -> None:
         assert not manager._ownership_started
 
     with (
-        patch("dataagent.engines.sandbox.runtime.docker.DockerClient", return_value=client),
+        patch(
+            "dataagent.engines.sandbox.runtime.docker.DockerClient", return_value=client
+        ),
         patch.object(
             manager._runtime, "reconcile", side_effect=RuntimeError("reconcile")
         ),
@@ -189,9 +191,13 @@ def test_write_artifact_returns_written_absolute_path() -> None:
     manager, _, _ = _manager()
     conversation_id = uuid4()
     content = io.BytesIO(b"data")
-    with patch.object(
-        manager, "_upload_normalized_file", new_callable=AsyncMock
-    ) as upload:
+    store = manager._storage
+    store.freeze_stream.return_value = "/data/fixed/result.csv"
+    with (
+        patch.object(manager, "init", new_callable=AsyncMock),
+        patch.object(manager._runtime, "get_or_create_storage"),
+        patch.object(manager._runtime, "touch"),
+    ):
         result = asyncio.run(
             manager.write_artifact(
                 7,
@@ -201,16 +207,8 @@ def test_write_artifact_returns_written_absolute_path() -> None:
                 session_scope=SandboxSessionScope("analysis", "analyst", "session"),
             )
         )
-    assert (
-        result
-        == f"/data/{conversation_id}/sessions/analysis/analyst/session/result.csv"
-    )
-    upload.assert_awaited_once_with(
-        7,
-        conversation_id,
-        "sessions/analysis/analyst/session/result.csv",
-        content,
-    )
+    assert result == store.freeze_stream.return_value
+    assert store.freeze_stream.call_args.args[-2] is content
 
 
 def test_resolve_artifact_rejects_invalid_paths_without_storage_access() -> None:

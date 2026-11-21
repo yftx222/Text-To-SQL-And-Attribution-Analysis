@@ -10,6 +10,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.types import StreamPart
 from loguru import logger
 
+from dataagent.engines.agent.common.tools.view_image import is_supported_image_path
 from dataagent.engines.assistant import contracts as chat_schema
 from dataagent.engines.assistant.contracts import PlannerTurnContext
 from dataagent.engines.assistant.errors import PlannerContinuationLimitError
@@ -26,6 +27,7 @@ from dataagent.engines.assistant.messages.projection import (
 )
 from dataagent.engines.assistant.messages.stream import MessageDeltaParser
 from dataagent.engines.assistant.sessions.identity import build_planner_config
+from dataagent.engines.common.observability import evaluation
 
 if TYPE_CHECKING:
     from dataagent.engines.assistant.execution.runtime_cache import AgentManager
@@ -33,13 +35,23 @@ if TYPE_CHECKING:
 
 
 async def run_agent_turn(
+    #AgentManager 的实例，负责创建、缓存和取得会话对应的 Agent。
     agents: AgentManager,
+    #管理 Docker 沙箱中的文件与产物
     files: DockerSandboxManager,
     turn_context: PlannerTurnContext,
     user_message: chat_schema.UserMessageRequest | None,
 ) -> AsyncGenerator[chat_schema.ChatStreamEventPayload]:
     """执行新回合或从待执行 Checkpoint 恢复同一回合。"""
     user_id, conversation_id = turn_context.user_id, turn_context.conversation_id
+    if user_message is not None and user_message.attachments:
+        attachments = []
+        for item in user_message.attachments:
+            if is_supported_image_path(item.f_path):
+                path = await files.freeze_attachment(user_id, conversation_id, item.f_path)
+                item = item.model_copy(update={"f_path": path})
+            attachments.append(item)
+        user_message = user_message.model_copy(update={"attachments": attachments})
     input_messages: list[BaseMessage] | None = (
         [schema_to_human_message(user_message, conversation_id)]
         if user_message is not None
@@ -51,23 +63,28 @@ async def run_agent_turn(
         f"parts={len(user_message.parts) if user_message is not None else 0}, "
         f"attachments={len(user_message.attachments or ()) if user_message is not None else 0}"
     )
+    #获取当前会话对应的 Agent 运行时，并在使用期间管理它的生命周期
+    #运行时（Runtime）：指程序运行期间所使用的环境或相关运行资源。
+    #use_runtime负责获取、保护和释放会话级 Agent 运行时的使用权
     async with agents.use_runtime(user_id, conversation_id) as runtime:
         continuation_count = 0
         deltas = MessageDeltaParser()
         while True:
             last_finish_reason: str | None = None
+            config = build_planner_config(user_id, conversation_id)
+            if evaluation.callback is not None:
+                config["callbacks"] = [evaluation.callback]
 
             # LangGraph 的重载声明返回 AsyncIterator，实际 astream 是异步生成器。
             async with aclosing(
                 cast(
                     AsyncGenerator[StreamPart[Any, Any]],
+                    #真正执行planner的地方，返回一个异步生成器，逐步产出执行事件
                     runtime.planner.astream(
                         input={"messages": input_messages}
                         if input_messages is not None
                         else None,
-                        config=build_planner_config(
-                            turn_context.user_id, turn_context.conversation_id
-                        ),
+                        config=config,
                         stream_mode=["updates", "custom", "messages"],
                         version="v2",
                     ),
@@ -125,6 +142,7 @@ async def run_agent_turn(
                                 files,
                                 user_id,
                                 conversation_id,
+                                planner_reply=True,
                             )
                             if response is not None:
                                 responses.append(response)

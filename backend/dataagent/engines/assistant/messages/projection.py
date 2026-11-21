@@ -57,6 +57,8 @@ async def langchain_message_to_schema(
     files: DockerSandboxManager,
     user_id: int,
     conversation_id: UUID,
+    *,
+    planner_reply: bool = False,
 ) -> chat_schema.MessageResponse | None:
     """将 LangChain 消息转换为接口消息。"""
     if isinstance(message, ToolMessage):
@@ -76,6 +78,28 @@ async def langchain_message_to_schema(
                     conversation_id,
                 )
                 content = json.dumps(result, ensure_ascii=False)
+        if (
+            message.name == "publish_artifact"
+            and isinstance(message.content, str)
+            and message.status != "error"
+        ):
+            try:
+                receipt = json.loads(message.content)
+            except ValueError:
+                receipt = None
+            if (
+                isinstance(receipt, dict)
+                and receipt.get("status") == "verified"
+                and isinstance(receipt.get("f_path"), str)
+            ):
+                path = receipt["f_path"]
+                attachments = [
+                    chat_schema.Attachment(
+                        f_path=path,
+                        media_type=mimetypes.guess_type(path)[0],
+                        delivery_status="verified",
+                    )
+                ]
         return chat_schema.MessageResponse(
             message_id=message.id,
             created_at=_message_created_at(message),
@@ -152,7 +176,7 @@ async def langchain_message_to_schema(
 
     if is_final_assistant_message(message):
         return await _project_artifact_directives(
-            schema, files, user_id, conversation_id
+            schema, files, user_id, conversation_id, planner_reply=planner_reply
         )
     return schema
 
@@ -304,6 +328,8 @@ async def _project_artifact_directives(
     files: DockerSandboxManager,
     user_id: int,
     conversation_id: UUID,
+    *,
+    planner_reply: bool = False,
 ) -> chat_schema.MessageResponse:
     """把统一文件指令投影为附件，保留无效指令及代码示例。"""
 
@@ -319,11 +345,17 @@ async def _project_artifact_directives(
         return schema
     candidate_paths = [path for _, _, path in directives]
 
-    accepted_paths: set[str] = set()
+    # Planner 的附件来自发布回执；正文里的文件指令只需移除。
+    accepted_paths = set(candidate_paths) if planner_reply else set()
     attachments: list[chat_schema.Attachment] = []
     seen_paths: set[str] = set()
-    resolved = await files.resolve_artifacts(user_id, conversation_id, candidate_paths)
-    for directive_path in dict.fromkeys(candidate_paths):
+    draft_paths = [] if planner_reply else list(dict.fromkeys(candidate_paths))
+    resolved = (
+        await files.resolve_artifacts(user_id, conversation_id, draft_paths)
+        if draft_paths
+        else {}
+    )
+    for directive_path in draft_paths:
         artifact = resolved.get(directive_path)
         if artifact is None:
             logger.warning(
@@ -341,6 +373,7 @@ async def _project_artifact_directives(
             chat_schema.Attachment(
                 f_path=relative_path,
                 media_type=media_type,
+                delivery_status="draft",
             )
         )
 
@@ -391,6 +424,13 @@ async def _project_delegation_result(
         user_id,
         conversation_id,
     )
+    outcome = result.get("outcome")
+    if isinstance(outcome, dict) and outcome.get("verdict") in {
+        "blocked",
+        "needs_revision",
+    }:
+        for attachment in projected.attachments or []:
+            attachment.delivery_status = "needs_revision"
     return {
         **result,
         "content": "".join(

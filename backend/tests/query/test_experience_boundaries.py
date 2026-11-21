@@ -74,6 +74,21 @@ def test_recall_reads_metadata_outside_query_transactions_and_excludes_stale_ass
     items = [current, stale, deleted]
     repo = MagicMock(
         get_many=AsyncMock(return_value=items),
+        approved_examples=AsyncMock(
+            return_value={
+                current.id: (
+                    SimpleNamespace(
+                        id=uuid4(),
+                        purpose="统计",
+                        sql_template="SELECT 1",
+                        result_summary={
+                            "asset_versions": {current.assets[0].resource_key: 3}
+                        },
+                    ),
+                    SimpleNamespace(metric="订单数", data_scope="九月"),
+                )
+            }
+        ),
         disable_for_metadata_change=AsyncMock(
             return_value={stale.id: 3, deleted.id: 3}
         ),

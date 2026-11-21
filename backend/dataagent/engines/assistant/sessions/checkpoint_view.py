@@ -145,6 +145,8 @@ class SpecialistCheckpointView:
         record = self.delegation_record(delegation_id)
         if record is None or record.result is None:
             return None
+        if record.task is not None and record.task != request:
+            raise ValueError("同一委派标识不能用于不同请求")
         result = record.result
         if (result.analysis_id, result.agent_type, result.session_id) != (
             request.analysis_id,
@@ -162,8 +164,16 @@ class SpecialistCheckpointView:
         updated_at: datetime | None,
     ) -> SessionSummary:
         """投影 Session 列表中的摘要状态。"""
-        result = self.latest_result()
+        ident = self._values.get("current_delegation_id")
+        record = self.delegation_record(ident) if isinstance(ident, str) else None
+        result = record.result if record else self.latest_result()
         return SessionSummary(
+            delegation_id=record.delegation_id if record else None,
+            inputs=record.task.inputs if record and record.task else [],
+            outputs=result.outputs if result else [],
+            business_status=result.outcome.verdict
+            if result and result.outcome
+            else None,
             analysis_id=session_key.analysis_id,
             agent_type=session_key.agent_type,
             session_id=session_key.session_id,

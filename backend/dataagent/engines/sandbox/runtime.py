@@ -8,7 +8,7 @@ import json
 import time
 from collections.abc import Sequence
 from contextlib import suppress
-from threading import Event
+from threading import Event, Lock
 from typing import Any
 
 from docker.errors import APIError, ImageNotFound, NotFound
@@ -58,6 +58,7 @@ class DockerRuntime:
         ):
             raise ValueError("沙箱只读挂载目标路径不能互相嵌套")
         self._client: docker.DockerClient | None = None
+        self._client_lock = Lock()
         self._container_spec: str | None = None
 
     @property
@@ -67,9 +68,10 @@ class DockerRuntime:
 
     def close(self) -> None:
         """释放 Docker 客户端。"""
-        client, self._client = self._client, None
-        if client is not None:
-            client.close()
+        with self._client_lock:
+            client, self._client = self._client, None
+            if client is not None:
+                client.close()
 
     def delete_user_storage(self, user_id: int) -> None:
         """删除用户容器及其持久化卷，调用方持有维护和容量锁。"""
@@ -80,13 +82,23 @@ class DockerRuntime:
             client.volumes.get(self._volume_name(user_id)).remove(force=True)
 
     def _get_client(self) -> docker.DockerClient:
-        """获取已初始化的 Docker 客户端。"""
-        if self._client is None:
-            raise RuntimeError("Docker 沙箱管理器尚未初始化")
-        return self._client
+        """借出 Docker 客户端，已断开的 SSH 会话在这里重建。"""
+        with self._client_lock:
+            if self._client is None:
+                raise RuntimeError("Docker 沙箱管理器尚未初始化")
+            if self._config.docker_host.startswith("ssh://"):
+                transport = self._ssh_transport(self._client)
+                if transport is None or not transport.is_active():
+                    replacement = self._connect_client()
+                    previous, self._client = self._client, replacement
+                    previous.close()
+            return self._client
 
-    def initialize(self) -> None:
-        """连接 Docker 并加载沙箱镜像。"""
+    @staticmethod
+    def _ssh_transport(client: docker.DockerClient):
+        return client.api.get_adapter(client.api.base_url).ssh_client.get_transport()
+
+    def _connect_client(self) -> docker.DockerClient:
         client = docker.DockerClient(
             base_url=self._config.docker_host,
             version="auto",
@@ -98,7 +110,20 @@ class DockerRuntime:
             max_pool_size=2,
         )
         try:
+            if self._config.docker_host.startswith("ssh://"):
+                transport = self._ssh_transport(client)
+                if transport is not None:
+                    transport.set_keepalive(30)
             client.ping()
+        except Exception:
+            client.close()
+            raise
+        return client
+
+    def initialize(self) -> None:
+        """连接 Docker 并加载沙箱镜像。"""
+        client = self._connect_client()
+        try:
             try:
                 image = client.images.get(self._config.image)
             except ImageNotFound as exc:

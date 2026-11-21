@@ -140,6 +140,11 @@ class QueryConfig(AppConfigModel):
     batch_size: int = Field(gt=0)
     sample_rows: int = Field(ge=0, le=100)
     query_experience_vector_score_threshold: float = Field(ge=0, le=1)
+    learn_from_queries: bool = True
+    ontology_enabled: bool = False
+    ontology_database: str = "dataagent_mfg_service_demo"
+    ontology_role_scopes: dict[str, str] = Field(default_factory=dict)
+    ontology_max_evidence_rows: int = Field(default=2000, gt=0)
 
 
 class SandboxOwnershipConfig(AppConfigModel):
@@ -167,6 +172,7 @@ class SandboxConfig(AppConfigModel):
     memory_limit: str = Field(min_length=1)
     nano_cpus: int = Field(gt=0)
     pids_limit: int = Field(gt=0)
+    shell_timeout_seconds: int = Field(default=300, gt=0)
     internal_command_timeout_seconds: int = Field(default=60, gt=0, le=600)
     max_file_bytes: int = Field(gt=0)
     max_user_storage_bytes: int = Field(gt=0)
@@ -283,6 +289,10 @@ class OrchestrationConfig(AppConfigModel):
     max_parallel_sessions: int = Field(gt=0)
     max_sessions: int = Field(gt=0)
     max_continuations: int = Field(ge=0)
+    max_delegations: int = Field(default=24, gt=0)
+    max_repairs: int = Field(default=3, ge=0)
+    analysis_seconds: int = Field(default=1800, gt=0)
+    delegation_seconds: int = Field(default=600, gt=0)
 
 
 class SpecialistConfig(AppConfigModel):

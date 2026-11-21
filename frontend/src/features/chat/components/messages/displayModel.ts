@@ -337,6 +337,20 @@ export function groupDisplayItemsIntoTurns(
       allowFinalMessage
     );
 
+    const verified = intermediateItems.flatMap(item =>
+      item.type === "tool_run" && item.name === "publish_artifact"
+        ? (item.attachments ?? []).filter(file => file.delivery_status === "verified")
+        : []
+    );
+    const delivered = finalItem ? {
+      ...finalItem,
+      message: {
+        ...finalItem.message,
+        attachments: verified.length
+          ? Array.from(new Map(verified.map(file => [file.f_path, file])).values())
+          : null,
+      },
+    } : finalItem;
     const turnId =
       currentUserItem?.key ??
       (finalItem?.key || intermediateItems[0]?.key || `turn-${turns.length}`);
@@ -345,7 +359,7 @@ export function groupDisplayItemsIntoTurns(
       turnId,
       userItem: currentUserItem,
       intermediateItems,
-      finalItem,
+      finalItem: delivered,
     });
 
     currentUserItem = null;
@@ -466,7 +480,7 @@ export function parseDelegationResult(result: string | undefined): DelegationRes
 /** 根据工具结果中的状态判断调用是否失败。 */
 export function isToolResultFailure(result: string | undefined): boolean {
   const status = getToolResultStatus(result);
-  return status === "error" || status === "failed";
+  return status === "error" || status === "failed" || status === "blocked" || status === "needs_revision";
 }
 
 /** 结合最终结果、中断标记和活动事件确定委派状态。 */

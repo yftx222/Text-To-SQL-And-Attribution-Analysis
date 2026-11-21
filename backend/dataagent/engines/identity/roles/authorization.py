@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataagent.engines.identity import errors as auth_error
-from dataagent.engines.identity.contracts import AssetAccessPolicy, AssetIdentity
+from dataagent.engines.identity.contracts import (
+    AssetAccessPolicy,
+    AssetIdentity,
+    ResolvedQueryPrincipal,
+)
 from dataagent.engines.identity.models.doris import (
     DorisAuthorizationSnapshot,
     DorisQueryIdentity,
@@ -74,7 +78,7 @@ class AuthorizationService:
     @staticmethod
     def policy_from_snapshot(
         user_id: int,
-        identity: DorisQueryIdentity,
+        identity: DorisQueryIdentity | ResolvedQueryPrincipal,
         snapshot: DorisAuthorizationSnapshot,
     ) -> AssetAccessPolicy:
         """将同一次观察得到的授权内容构造成不可变策略。"""

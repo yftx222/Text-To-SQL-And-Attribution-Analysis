@@ -1,0 +1,2 @@
+# Published ontology revisions fingerprint the checked-out SQL bytes.
+backend/dataagent/engines/query/ontology/recurrent_faults.sql text eol=crlf

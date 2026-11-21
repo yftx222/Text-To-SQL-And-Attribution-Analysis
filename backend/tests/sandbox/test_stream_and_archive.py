@@ -21,6 +21,52 @@ from dataagent.engines.sandbox.storage import SandboxStorage
 from tests.sandbox.fakes import FakeSandboxOwnership, build_sandbox_config
 
 
+def test_published_versions_round_trip_and_remain_bound_to_original_bytes():
+    from pathlib import PurePosixPath
+    from dataagent.engines.sandbox.paths import resolve_artifact_path
+
+    container = MagicMock()
+    archives = {}
+
+    def put_archive(base, buffer):
+        with tarfile.open(fileobj=buffer) as archive:
+            for entry in archive:
+                if entry.isdir():
+                    assert (entry.uid, entry.mode) == (0, 0o750)
+                else:
+                    assert (entry.uid, entry.mode) == (0, 0o440)
+                    archives[str(PurePosixPath(base) / entry.name)] = (
+                        entry,
+                        archive.extractfile(entry).read(),
+                    )
+        return True
+
+    container.put_archive.side_effect = put_archive
+    store = SandboxStorage(4096)
+    conv = uuid4()
+    with patch.object(
+        store, "read_file", side_effect=lambda _, p, limit: archives[p][::-1]
+    ):
+        for name in ("chart.png", "report.html", "orders.csv"):
+            first, second = [
+                resolve_artifact_path(
+                    store.freeze_bytes(container, conv, 101, name, data), conv
+                )
+                for data in (b"first", b"second")
+            ]
+            assert first != second
+            assert store.download_file(container, conv, first.relative_path) == b"first"
+            assert (
+                store.download_file(container, conv, second.relative_path) == b"second"
+            )
+            with pytest.raises(SandboxPathError):
+                resolve_artifact_path(first.path, uuid4())
+            member, _ = archives[first.path]
+            archives[first.path] = member, b"changed"
+            with pytest.raises(OSError, match="摘要"):
+                store.download_file(container, conv, first.relative_path)
+
+
 def _backend():
     container = MagicMock()
     runtime = MagicMock(spec=DockerRuntime)

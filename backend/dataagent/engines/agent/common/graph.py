@@ -22,6 +22,7 @@ from dataagent.engines.agent.common.middleware.message_context import (
 from dataagent.engines.agent.common.shell_jobs import ShellJobRuntime
 from dataagent.engines.agent.common.tools.shell import create_shell_tools
 from dataagent.engines.agent.common.tools.view_image import (
+    create_freeze_tool,
     create_view_image_tool,
     supports_view_image_tool,
 )
@@ -38,6 +39,7 @@ def create_agent(
     backend: DockerSandboxBackend,
     checkpointer: BaseCheckpointSaver,
     shell_jobs: ShellJobRuntime,
+    allow_shell: bool,
     filesystem_tools: Sequence[FsToolName],
     skill_mount: SandboxReadonlyMount | None = None,
     state_schema: type[DeepAgentState] | None = None,
@@ -64,12 +66,13 @@ def create_agent(
         model=model,
         tools=[
             *tools,
+            *([create_freeze_tool(backend.freeze_file)] if name != "planner" else []),
             *(
-                [create_view_image_tool(backend.workspace_dir)]
+                [create_view_image_tool(backend.workspace_dir, backend.freeze_file)]
                 if supports_view_image_tool(model)
                 else []
             ),
-            *create_shell_tools(shell_jobs),
+            *(create_shell_tools(shell_jobs) if allow_shell else []),
         ],
         system_prompt=system_prompt,
         middleware=[
@@ -79,6 +82,7 @@ def create_agent(
                 backend.conversation_dir,
                 shell_jobs,
                 working_directory=backend.workspace_dir,
+                agent_name=name,
             ),
         ],
         backend=resolved_backend,

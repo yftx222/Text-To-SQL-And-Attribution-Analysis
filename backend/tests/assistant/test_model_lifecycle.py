@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 
 from dataagent.engines import orchestrator as runtime_factory
 from dataagent.engines.common import llm as model_factory
+from dataagent.engines.common.observability import run_metrics
 from dataagent.engines.contract.config import (
     LMConfigCfg,
     ModelCfg,
@@ -89,6 +90,8 @@ def test_runtime_init_failure_closes_already_created_models() -> None:
         MagicMock(),
         recall=MagicMock(),
         query=MagicMock(),
+        receipts=MagicMock(),
+        budget=MagicMock(),
         activity=MagicMock(),
     )
 
@@ -106,3 +109,24 @@ def test_runtime_init_failure_closes_already_created_models() -> None:
         ),
     ):
         asyncio.run(run())
+
+
+def test_dependency_metrics_preserve_status_and_timeout():
+    def value(outcome):
+        prefix = f'aiops_dependency_requests_total{{dependency="llm",outcome="{outcome}"}} '
+        return int(next(line[len(prefix):] for line in run_metrics.render().splitlines() if line.startswith(prefix)))
+
+    def send(request):
+        if request.url.path == "/slow":
+            raise httpx.ReadTimeout("test timeout", request=request)
+        return httpx.Response(429)
+
+    async def run():
+        initial = value("rate_limited"), value("timeout")
+        async with model_factory._ObservedAsyncClient(transport=httpx.MockTransport(send)) as client:
+            assert (await client.get("http://fixture.test/limited")).status_code == 429
+            with pytest.raises(httpx.ReadTimeout):
+                await client.get("http://fixture.test/slow")
+        assert (value("rate_limited"), value("timeout")) == (initial[0] + 1, initial[1] + 1)
+
+    asyncio.run(run())

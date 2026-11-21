@@ -48,7 +48,7 @@ class DockerShellJobRunner:
         command: str,
         started_callback: Callable[[], None] | None = None,
     ) -> SandboxShellJobExecution:
-        """执行无固定总时限的 Specialist Shell Job。"""
+        """执行受时间与存储额度约束的 Specialist Shell Job。"""
         self._validate_job_id(job_id)
         if not command.strip():
             raise ValueError("Shell 命令不能为空")
@@ -202,6 +202,9 @@ class DockerShellJobRunner:
                     "directory_mode": execution.directory_mode,
                     "umask": execution.umask,
                     "max_file_bytes": execution.max_file_bytes,
+                    "timeout_seconds": execution.shell_timeout_seconds,
+                    "storage_bytes": execution.max_user_storage_bytes,
+                    "volume_root": SANDBOX_DATA_ROOT,
                 },
                 separators=(",", ":"),
             ).encode()

@@ -1,0 +1,96 @@
+{
+  "ORD-01": {
+    "column": [
+      [
+        "dwd_trade_order_detail_di.order_id"
+      ],
+      [
+        "dwd_trade_order_detail_di.order_create_time",
+        "dwd_trade_order_detail_di.biz_date"
+      ]
+    ]
+  },
+  "AMT-02": {
+    "column": [
+      [
+        "dwd_trade_order_detail_di.receivable_amount"
+      ],
+      [
+        "dwd_trade_order_detail_di.order_id"
+      ],
+      [
+        "dwd_trade_order_status_event_di.after_order_status"
+      ],
+      [
+        "dwd_trade_order_status_event_di.event_time"
+      ]
+    ],
+    "metric": [
+      [
+        "有效GMV"
+      ]
+    ]
+  },
+  "PAY-04": {
+    "column": [
+      [
+        "dwd_trade_pay_detail_di.pay_detail_id"
+      ],
+      [
+        "dwd_trade_pay_detail_di.biz_date",
+        "dwd_trade_pay_detail_di.pay_request_time"
+      ],
+      [
+        "dwd_trade_pay_status_event_di.after_pay_status"
+      ],
+      [
+        "dwd_trade_pay_status_event_di.event_time"
+      ]
+    ],
+    "metric": [
+      [
+        "支付成功率"
+      ]
+    ]
+  },
+  "CNV-01": {
+    "column": [
+      [
+        "dwd_trade_order_detail_di.receivable_amount"
+      ],
+      [
+        "dwd_trade_order_detail_di.order_create_time",
+        "dwd_trade_order_detail_di.biz_date"
+      ]
+    ]
+  },
+  "INV-06": {
+    "column": [
+      [
+        "dwd_inventory_daily_snapshot_df.available_qty"
+      ],
+      [
+        "dwd_inventory_daily_snapshot_df.biz_date"
+      ],
+      [
+        "dwd_inventory_daily_snapshot_df.sku_id",
+        "dwd_inventory_daily_snapshot_df.sku_sk"
+      ]
+    ]
+  },
+  "ATT-01": {
+    "column": [
+      [
+        "dwd_trade_order_detail_di.receivable_amount"
+      ],
+      [
+        "dwd_trade_order_detail_di.order_create_time",
+        "dwd_trade_order_detail_di.biz_date"
+      ],
+      [
+        "dwd_trade_order_detail_di.channel_sk",
+        "dwd_trade_order_detail_di.channel_code"
+      ]
+    ]
+  }
+}

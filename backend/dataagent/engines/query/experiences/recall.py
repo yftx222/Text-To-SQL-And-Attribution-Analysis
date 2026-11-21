@@ -89,6 +89,22 @@ class QueryExperienceService:
         )
         if semantic_recall.status == "failed":
             return QueryExperienceRecall(status="failed", results=[])
+        return await self._ranked(policy, semantic_recall, limit)
+
+    async def refresh_examples(self, policy, examples):
+        """旧召回快照展示前重新核对审核、权限及元数据版本。"""
+        ranks = {item.id: -rank for rank, item in enumerate(examples)}
+        return (
+            (
+                await self._ranked(
+                    policy, _SemanticRecall("success", ranks), len(ranks)
+                )
+            ).results
+            if ranks
+            else []
+        )
+
+    async def _ranked(self, policy, semantic_recall, limit):
         semantic_ranks = semantic_recall.ranks
         async with self._postgres.session() as session, session.begin():
             experiences = await QueryExperiencePGRepo(session).get_many(
@@ -149,6 +165,7 @@ class QueryExperienceService:
                 for experience in experiences
                 if experience.id not in invalid_revisions
             ]
+            approved = await repo.approved_examples([item.id for item in experiences])
         for experience_id, revision in invalid_revisions.items():
             self._index_scheduler.enqueue(experience_id, revision)
         ordered_experiences = sorted(
@@ -158,7 +175,13 @@ class QueryExperienceService:
         results = [
             result
             for experience in ordered_experiences
-            if (result := self._to_recall_result(experience, policy)) is not None
+            if experience.id in approved
+            and (
+                result := self._to_recall_result(
+                    experience, policy, *approved[experience.id]
+                )
+            )
+            is not None
         ][:limit]
         return QueryExperienceRecall(
             status=semantic_recall.status,
@@ -236,6 +259,8 @@ class QueryExperienceService:
         self,
         experience: QueryExperience,
         policy: AssetAccessPolicy,
+        execution,
+        review,
     ) -> QueryExperienceRecallResult | None:
         """将已通过有效性检查的经验转换为模型可用结果。"""
         assets = [
@@ -259,9 +284,16 @@ class QueryExperienceService:
             assets, policy, self._data_source, self._database_name
         ):
             return None
+        if (execution.result_summary or {}).get("asset_versions") != {
+            a.resource_key: a.meta_version for a in experience.assets
+        }:
+            return None
         return QueryExperienceRecallResult(
             id=experience.id,
-            purpose=experience.purposes[-1],
-            sql_template=experience.sql_template,
+            purpose=execution.purpose,
+            execution_id=execution.id,
+            metric=review.metric,
+            data_scope=review.data_scope,
+            sql_template=execution.sql_template,
             assets=assets,
         )

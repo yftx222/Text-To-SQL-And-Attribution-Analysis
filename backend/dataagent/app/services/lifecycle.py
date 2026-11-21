@@ -16,10 +16,12 @@ from dataagent.engines.assistant.execution.activity import SessionActivity
 from dataagent.engines.assistant.execution.runs import ConversationRunService
 from dataagent.engines.assistant.execution.runtime_cache import AgentManager
 from dataagent.engines.assistant.models.base import AssistantBase
+from dataagent.engines.assistant.repositories.budget import AnalysisBudgetStore
 from dataagent.engines.assistant.repositories.checkpoint import PostgresCheckpointStore
 from dataagent.engines.assistant.repositories.conversation_tombstone import (
     ConversationTombstoneStore,
 )
+from dataagent.engines.assistant.repositories.delivery import DeliveryReceiptStore
 from dataagent.engines.assistant.sessions.state_reader import AgentStateReader
 from dataagent.engines.contract.config import cfg
 from dataagent.engines.identity import IdentityService, UserDeletionStateService
@@ -41,6 +43,8 @@ from dataagent.engines.query import (
     query_experience_index_scheduler,
 )
 from dataagent.engines.query.models.base import QueryBase
+from dataagent.engines.query.ontology.registry import OntologyBase
+from dataagent.engines.query.ontology.service import OntologyService
 from dataagent.engines.sandbox import DockerSandboxManager
 from dataagent.engines.workflows import UserDeletionService
 
@@ -67,6 +71,7 @@ class WebResources:
     conversations: ConversationLifecycleService
     user_deletion: UserDeletionService
     auth_rate_limit: AuthRateLimitService
+    ontology: OntologyService | None
 
 
 @asynccontextmanager
@@ -85,6 +90,8 @@ async def lifespan(app: FastAPI):
             (resources.assistant, AssistantBase.metadata),
         ):
             await postgres.init_tables(metadata)
+        if resources.ontology is not None:
+            await resources.meta.init_tables(OntologyBase.metadata)
         await resources.agents.init()
         logger.info("应用资源初始化完成")
         app.state.resources = resources
@@ -146,6 +153,13 @@ def _create_resources(stack: AsyncExitStack) -> WebResources:
         assistant,
     )
     activity = SessionActivity()
+    ontology = None
+    if cfg.query.ontology_enabled:
+        clients = DorisQueryClientRegistry(
+            cfg.doris.model_copy(update={"database": cfg.query.ontology_database})
+        )
+        stack.push_async_callback(clients.close)
+        ontology = OntologyService(identity, meta, clients, cfg.query)
     factory = ConversationAgentRuntimeFactory(
         persistence,
         locks,
@@ -162,6 +176,9 @@ def _create_resources(stack: AsyncExitStack) -> WebResources:
             index_scheduler=query_experience_index_scheduler,
         ),
         activity,
+        DeliveryReceiptStore(assistant),
+        AnalysisBudgetStore(assistant, cfg.agent.orchestration),
+        ontology=ontology,
     )
     agents = AgentManager(persistence, tombstones, locks, factory)
     stack.push_async_callback(agents.close)
@@ -203,4 +220,5 @@ def _create_resources(stack: AsyncExitStack) -> WebResources:
             conversations,
         ),
         auth_rate_limit=auth_rate_limit,
+        ontology=ontology,
     )

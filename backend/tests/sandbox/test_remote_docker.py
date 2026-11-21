@@ -34,6 +34,23 @@ def test_remote_target_does_not_use_local_docker_environment(monkeypatch):
     runtime.close()
 
 
+def test_remote_runtime_replaces_inactive_ssh_transport():
+    runtime = DockerRuntime(
+        build_sandbox_config(docker_host="ssh://dataagent-vm"), FakeSandboxOwnership()
+    )
+    stale, replacement = MagicMock(), MagicMock()
+    stale.api.get_adapter.return_value.ssh_client.get_transport.return_value.is_active.return_value = False
+    replacement.api.get_adapter.return_value.ssh_client.get_transport.return_value.is_active.return_value = True
+    runtime._client = stale
+    with patch.object(runtime, "_connect_client", return_value=replacement) as reconnect:
+        assert runtime._get_client() is replacement
+        assert runtime._get_client() is replacement
+    reconnect.assert_called_once_with()
+    stale.close.assert_called_once_with()
+    replacement.close.assert_not_called()
+    runtime.close()
+
+
 def test_readonly_mount_uses_remote_source_but_keeps_local_files(tmp_path):
     mount = SandboxReadonlyMount(
         source=tmp_path,

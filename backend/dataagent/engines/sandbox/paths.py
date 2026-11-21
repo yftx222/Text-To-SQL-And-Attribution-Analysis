@@ -1,6 +1,7 @@
 """沙箱工作区路径模型与校验。"""
 
 import posixpath
+import re
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -91,6 +92,12 @@ def resolve_artifact_path(
 ) -> SandboxArtifact:
     """解析公开产物，并检查会话或指定 Session 的目录范围。"""
     root = PurePosixPath(conversation_workspace_path(conversation_id))
+    version_root = root.parent / f".evidence-{conversation_id}"
+    candidate_version = PurePosixPath(path)
+    if candidate_version.parent == version_root:
+        if not re.fullmatch(r"(?:[0-9a-f-]{36}_)?[0-9a-f]{64}\.[a-z0-9]{1,12}", candidate_version.name):
+            raise SandboxPathError(path)
+        return SandboxArtifact(path, f"evidence/{candidate_version.name}")
     working_directory = (
         session_scope.workspace_path(conversation_id)
         if session_scope is not None

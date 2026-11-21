@@ -16,6 +16,7 @@ from decimal import Decimal
 from io import TextIOWrapper
 from itertools import islice
 from typing import TYPE_CHECKING, Any, TextIO
+from uuid import uuid4
 
 from loguru import logger
 
@@ -100,6 +101,7 @@ class AnalysisQueryService:
         purpose: str,
     ) -> AnalysisQueryResult:
         """执行已校验查询，返回会话产物及结果摘要。"""
+        execution_id = uuid4()
         sql_fingerprint = hashlib.sha256(normalized_sql.encode("utf-8")).hexdigest()[
             :16
         ]
@@ -125,14 +127,19 @@ class AnalysisQueryService:
                 normalized_sql,
             )
             temporary_file.seek(0)
+            digest = hashlib.file_digest(temporary_file, "sha256").hexdigest()
+            temporary_file.seek(0)
             artifact_path = await self._artifact_store.write_artifact(
                 session_key.user_id,
                 session_key.conversation_id,
-                f"{stem}.csv",
+                f"{execution_id}_{stem.encode('utf-8')[:210].decode('utf-8', errors='ignore')}.csv",
                 temporary_file,
                 session_scope=scope,
+                execution_id=execution_id,
             )
         result = AnalysisQueryResult(
+            execution_id=execution_id,
+            sha256=digest,
             path=artifact_path,
             columns=summary.columns,
             row_count=summary.row_count,

@@ -858,7 +858,13 @@ class ChatMessageArtifactTest(unittest.IsolatedAsyncioTestCase):
         assert schema is not None
         self.assertEqual(
             schema.attachments,
-            [chat_schema.Attachment(f_path=relative_path, media_type="image/png")],
+            [
+                chat_schema.Attachment(
+                    f_path=relative_path,
+                    media_type="image/png",
+                    delivery_status="draft",
+                )
+            ],
         )
         self.assertEqual(
             schema.parts, [chat_schema.TextContent(type="text", text="图片见附件。\n")]
@@ -1005,6 +1011,8 @@ class ChatMessageArtifactTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(history), 1)
         self.assertEqual(len(events), 1)
+        self.assertIsNone(history[0].attachments)
+        self.assertNotIn("DATAAGENT_ARTIFACT", str(history[0].parts))
         event = events[0]
         self.assertIsInstance(event, chat_schema.ChatStreamMessageEvent)
         assert isinstance(event, chat_schema.ChatStreamMessageEvent)

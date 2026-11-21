@@ -102,6 +102,19 @@ class IdentityService:
                 workload_group=identity.workload_group,
             )
 
+    async def scoped_asset_policy(
+        self, user_id: int, principal: ResolvedQueryPrincipal, database: str
+    ) -> AssetAccessPolicy:
+        """读取指定业务库的当前授权，不覆盖默认业务库的权限指纹。"""
+        snapshot = await self._doris_repo.read_authorization(
+            role_name=principal.role_name,
+            query_user=principal.query_user,
+            data_source=cfg.query.data_source,
+            catalog="internal",
+            database=database,
+        )
+        return AuthorizationService.policy_from_snapshot(user_id, principal, snapshot)
+
     def _authorization(self, repo: IdentityPGRepo) -> AuthorizationService:
         """使用当前身份仓储和配置的 Doris 数据范围组装授权服务。"""
         return AuthorizationService(

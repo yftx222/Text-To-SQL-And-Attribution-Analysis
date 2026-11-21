@@ -22,9 +22,42 @@ from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models import base as openai_chat_base
 
+from dataagent.engines.common.observability.run_metrics import record_model_request
 from dataagent.engines.contract import config as app_config
 
 _REQUEST_TIMEOUT_SECONDS = 30
+
+
+def _record_response(response: httpx.Response) -> httpx.Response:
+    status = response.status_code
+    outcome = ("rate_limited" if status == 429 else "unavailable" if status >= 500
+               else "ok" if status < 400 else "other")
+    record_model_request(outcome)
+    return response
+
+
+class _ObservedClient(httpx.Client):
+    def send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        try:
+            return _record_response(super().send(*args, **kwargs))
+        except httpx.TimeoutException:
+            record_model_request("timeout")
+            raise
+        except httpx.TransportError:
+            record_model_request("unavailable")
+            raise
+
+
+class _ObservedAsyncClient(httpx.AsyncClient):
+    async def send(self, *args: Any, **kwargs: Any) -> httpx.Response:
+        try:
+            return _record_response(await super().send(*args, **kwargs))
+        except httpx.TimeoutException:
+            record_model_request("timeout")
+            raise
+        except httpx.TransportError:
+            record_model_request("unavailable")
+            raise
 
 
 class DataAgentResponses(ChatOpenAI):
@@ -166,11 +199,11 @@ async def create_configured_model(model_name: str) -> AsyncGenerator[BaseChatMod
         "streaming": True,
         "timeout": _REQUEST_TIMEOUT_SECONDS,
     }
-    with httpx.Client(
+    with _ObservedClient(
         timeout=_REQUEST_TIMEOUT_SECONDS,
         follow_redirects=True,
     ) as http_client:
-        async with httpx.AsyncClient(
+        async with _ObservedAsyncClient(
             timeout=_REQUEST_TIMEOUT_SECONDS,
             follow_redirects=True,
         ) as http_async_client:

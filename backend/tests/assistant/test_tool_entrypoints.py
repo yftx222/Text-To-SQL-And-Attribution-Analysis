@@ -106,7 +106,10 @@ def test_invalid_tool_arguments_never_execute_business(kind):
     elif kind == "shell":
         tool, args = create_shell_tools(service)[2], {"job_id": "j", "wait_seconds": 61}
     else:
-        tool, args = create_view_image_tool("/data/conversation"), {"f_path": " "}
+        tool, args = (
+            create_view_image_tool("/data/conversation", lambda path: path),
+            {"f_path": " "},
+        )
     message = asyncio.run(_invoke(tool, args))
     assert message.status == "error"
     assert "Error invoking tool" in message.content
@@ -151,6 +154,60 @@ def test_delegation_schema_injects_runtime_and_normalizes_request_once():
     assert call.args[0].message == "分析"
     assert call.kwargs["delegation_id"] == "test-call"
     assert callable(call.kwargs["activity_writer"])
+
+
+@pytest.mark.parametrize(
+    ("verdict", "reviewed_path", "expect_hint"),
+    [
+        ("passed", "/data/result.html", True),
+        ("needs_revision", "/data/result.html", False),
+        ("passed", "/data/previous.html", False),
+    ],
+)
+def test_publish_hint_identifies_the_reviewed_version(
+    verdict, reviewed_path, expect_hint
+):
+    target = {
+        "agent_type": "analyst",
+        "session_id": "draft",
+        "delegation_id": "a1",
+        "path": "/data/result.html",
+    }
+    outcome = MagicMock(verdict=verdict, evidence=[reviewed_path])
+    result = MagicMock(status="completed", outcome=outcome, model_dump=lambda **_: {})
+    service = MagicMock(execute_delegation=AsyncMock(return_value=result))
+    tool = create_delegation_tools(service, service)[0]
+    message = asyncio.run(
+        _invoke(
+            tool,
+            {
+                "analysis_id": "analysis",
+                "agent_type": "reviewer",
+                "session_id": "review",
+                "message": "核对报告",
+                "inputs": [target],
+            },
+        )
+    )
+    hint = json.loads(message.content).get("publish_artifact_args")
+    assert hint == (
+        {"analysis_id": "analysis", "target": target} if expect_hint else None
+    )
+
+
+def test_report_source_requires_acceptance_before_spending_a_delegation():
+    service = MagicMock(execute_delegation=AsyncMock())
+    tool = create_delegation_tools(service, service)[0]
+    args = {
+        "analysis_id": "analysis",
+        "agent_type": "explorer",
+        "session_id": "source",
+        "message": "提供报告所需的金额数据",
+        "report_delivery": True,
+    }
+    response = json.loads(asyncio.run(_invoke(tool, args)).content)
+    assert response["status"] == "needs_revision" and "acceptance" in response["reason"]
+    service.execute_delegation.assert_not_awaited()
 
 
 def test_recall_normalizes_schema_and_passes_only_search_fields_to_metadata():
@@ -220,7 +277,7 @@ def test_tool_cancellation_is_not_converted_to_business_error(kind):
 
 
 def test_image_tool_normalizes_path_but_stored_payload_is_still_validated():
-    tool = create_view_image_tool("/data/conversation")
+    tool = create_view_image_tool("/data/conversation", lambda path: path)
     assert tool.invoke({"f_path": " ./chart.png "}) == {
         "type": "image_view_request",
         "f_path": "/data/conversation/chart.png",
@@ -233,7 +290,9 @@ def test_image_tool_normalizes_path_but_stored_payload_is_still_validated():
 
 
 def test_image_tool_resolves_session_paths_and_rejects_invalid_text():
-    tool = create_view_image_tool("/data/conversation/sessions/analyst/session")
+    tool = create_view_image_tool(
+        "/data/conversation/sessions/analyst/session", lambda path: path
+    )
     assert tool.invoke({"f_path": "tmp/../chart.png"})["f_path"] == (
         "/data/conversation/sessions/analyst/session/chart.png"
     )

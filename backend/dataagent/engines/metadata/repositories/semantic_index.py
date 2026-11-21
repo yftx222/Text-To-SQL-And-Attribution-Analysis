@@ -327,6 +327,7 @@ class SemanticIndexRepo[ItemT, KeyT](ABC):
             index=self._index_name,
             query=text_query,
             size=limit,
+            sort=[{"_score": "desc"}, {"resource_key": "asc"}],
         )
         return cast(dict[str, Any], result.body)
 

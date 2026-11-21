@@ -1,0 +1,54 @@
+schema_version: 1
+ontology_key: manufacturing_service
+revision: 2
+classification_revision: pilot_1
+source_kind: synthetic_pilot
+timezone: Asia/Shanghai
+clock: utc_microseconds
+operation: trace_recurrent_faults
+rule: nearest_same_class_after_effective_close_30d_v1
+# 身份均为 scope_id 下的稳定键。每种源数据都有明确粒度。
+sources:
+  device:
+    table: mfg_device
+    key: [scope_id, device_id]
+    columns: {scope_id: text, device_id: text}
+  customer:
+    table: mfg_customer
+    key: [scope_id, customer_id]
+    columns: {scope_id: text, customer_id: text}
+  category:
+    table: mfg_fault_category
+    key: [scope_id, raw_code]
+    columns: {scope_id: text, raw_code: text, category_id: text}
+  incident:
+    table: mfg_fault_incident
+    key: [scope_id, record_id]
+    columns: {scope_id: text, record_id: text, event_id: text, device_id: text, raw_code: text, occurred_us: integer, history_complete: integer, lifecycle_complete: integer}
+  work_order:
+    table: mfg_work_order
+    key: [scope_id, work_order_id]
+    columns: {scope_id: text, work_order_id: text, event_id: text}
+  lifecycle:
+    table: mfg_fault_lifecycle
+    key: [scope_id, transition_id]
+    columns: {scope_id: text, transition_id: text, event_id: text, state: text, effective_us: integer}
+  user_relation:
+    table: mfg_device_customer_relation
+    key: [scope_id, relation_id]
+    columns: {scope_id: text, relation_id: text, device_id: text, customer_id: text, role: text, valid_from_us: integer, valid_to_us: integer}
+  asset:
+    table: asset_detail
+    key: [scope_id, device_id]
+    columns: {scope_id: text, device_id: text, model: text, asset_tag: text, installed_on: text, lab: text}
+  product:
+    table: product
+    key: [model]
+    columns: {model: text, application: text, max_voltage_v: real, max_current_a: real, current_ranges: integer, source: text}
+dataset_scope: 试点设备全部取自新威产品目录，资产编号、客户与售后事实按场景构造。
+rule_summary: 同一资产及受控类别，找最近前序独立事件，按本次发生时已生效的关闭时间计算；间隔大于零且不超过30乘24小时。客户按本次发生时唯一有效的使用关系确定。
+relations:
+  work_order_handles_incident: [work_order.event_id, incident.event_id]
+  incident_on_device: [incident.device_id, device.device_id]
+  incident_has_category: [incident.raw_code, category.raw_code]
+  device_used_by_customer: [user_relation.device_id, user_relation.customer_id]

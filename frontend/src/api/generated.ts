@@ -13,6 +13,7 @@ export interface components {
       "table_name": (string | null);
     };
     "Attachment": {
+      "delivery_status"?: ("draft" | "needs_revision" | "verified" | null);
       "description"?: (string | null);
       "f_path": string;
       "media_type"?: (string | null);
@@ -1944,6 +1945,39 @@ export interface operations {
       };
     };
   };
+  "ontology_evidence_api_v1_chat__conversation_id__ontology__analysis_id___execution_id___file_kind__get": {
+    "parameters": {
+      "path": {
+        "analysis_id": string;
+        "conversation_id": string;
+        "execution_id": string;
+        "file_kind": "evidence" | "evidence.csv";
+      };
+      "query"?: never;
+      "header"?: never;
+      "cookie"?: never;
+    };
+    "requestBody"?: never;
+    "responses": {
+      "200": {
+        "content": {
+        "application/json": unknown;
+      };
+      };
+      "422": {
+        "content": {
+        "application/json": components["schemas"]["ProblemDetails"];
+        "application/problem+json": components["schemas"]["ProblemDetails"];
+      };
+      };
+      "default": {
+        "content": {
+        "application/json": components["schemas"]["ProblemDetails"];
+        "application/problem+json": components["schemas"]["ProblemDetails"];
+      };
+      };
+    };
+  };
   "refresh_api_v1_auth_refresh_post": {
     "parameters": {
       "path"?: never;
@@ -2448,6 +2482,9 @@ export interface paths {
   };
   "/api/v1/chat/{conversation_id}/events": {
     "get": operations["api_subscribe_conversation_run_api_v1_chat__conversation_id__events_get"];
+  };
+  "/api/v1/chat/{conversation_id}/ontology/{analysis_id}/{execution_id}/{file_kind}": {
+    "get": operations["ontology_evidence_api_v1_chat__conversation_id__ontology__analysis_id___execution_id___file_kind__get"];
   };
   "/api/v1/chat/{conversation_id}/resume": {
     "post": operations["api_resume_chat_api_v1_chat__conversation_id__resume_post"];

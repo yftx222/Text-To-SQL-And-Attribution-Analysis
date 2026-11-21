@@ -280,6 +280,7 @@ export function AttachmentChip({
             : "border-[#e4e4de] bg-[#ffffff] text-[#27272a] shadow-[0_1px_2px_rgba(0,0,0,0.03)] hover:border-[#b8b8b0] hover:bg-[#fafaf8]"
         )}
       >
+        {!isUser && <span>{{ draft: "草稿", needs_revision: "待修补", verified: "已验证" }[attachment.delivery_status ?? "draft"]}</span>}
         <AttachmentIconBadge
           attachment={attachment}
           imageUrl={imageUrl}

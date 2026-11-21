@@ -4,6 +4,7 @@ from dataagent.engines.sandbox.backend import DockerSandboxBackend
 from dataagent.engines.sandbox.manager import DockerSandboxManager
 from dataagent.engines.sandbox.paths import (
     conversation_workspace_path,
+    resolve_artifact_path,
     resolve_attachment_path,
     resolve_sandbox_path,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "DockerSandboxManager",
     "DockerShellJobRunner",
     "conversation_workspace_path",
+    "resolve_artifact_path",
     "resolve_attachment_path",
     "resolve_sandbox_path",
 ]

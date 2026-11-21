@@ -17,7 +17,6 @@ from dataagent.engines.agent.common.middleware.message_context import (
     MessageContextMiddleware,
 )
 from dataagent.engines.agent.common.shell_jobs import (
-    ShellJobError,
     ShellJobResult,
     ShellJobRuntime,
     ShellJobSummary,
@@ -89,7 +88,7 @@ def _runtime(
 
 
 class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
-    async def test_foreground_completion_returns_only_output_and_is_not_public(
+    async def test_foreground_completion_returns_status_without_listing(
         self,
     ) -> None:
         backend = _FakeShellBackend()
@@ -97,10 +96,10 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         result = await runtime.start("printf done")
 
-        self.assertEqual(result, "done\n")
+        self.assertEqual(result.output, "done\n")
+        self.assertEqual(result.status, "completed")
         self.assertEqual(runtime.list(), [])
-        self.assertEqual(len(backend.cleaned), 1)
-        self.assertTrue(backend.cleaned[0][1])
+        self.assertEqual(backend.cleaned, [])
         await runtime.cleanup()
 
     async def test_foreground_truncation_returns_output_path_and_keeps_log(
@@ -118,17 +117,14 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         result = await runtime.start("large output")
 
-        self.assertIsInstance(result, str)
-        assert isinstance(result, str)
-        self.assertIn("HEAD", result)
-        self.assertIn("TAIL", result)
-        self.assertIn("详细输出文件: ", result)
+        self.assertTrue(result.output_inline_truncated)
+        self.assertIn("HEAD", result.output)
+        self.assertTrue(result.output_path.endswith(".log"))
         self.assertEqual(runtime.list(), [])
-        self.assertEqual(len(backend.cleaned), 1)
-        self.assertFalse(backend.cleaned[0][1])
+        self.assertEqual(backend.cleaned, [])
         await runtime.cleanup()
 
-    async def test_foreground_failure_without_output_returns_error_text(self) -> None:
+    async def test_foreground_failure_without_output_returns_exit_code(self) -> None:
         backend = _FakeShellBackend(
             SandboxShellJobExecution(status="failed", exit_code=1)
         )
@@ -136,8 +132,28 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
 
         result = await runtime.start("false")
 
-        self.assertEqual(result, "Shell 命令以退出码 1 结束")
+        self.assertEqual((result.status, result.exit_code), ("failed", 1))
         await runtime.cleanup()
+
+    async def test_nonzero_exit_preserves_partial_and_empty_output(self):
+        for output in ("ready", ""):
+            for blocked in (False, True):
+                backend = _FakeShellBackend(
+                    SandboxShellJobExecution(
+                        status="failed", exit_code=1, output=output
+                    ),
+                    blocked=blocked,
+                )
+                runtime = _runtime(backend)
+                result = await runtime.start("command")
+                backend.release.set()
+                result = await runtime.get(result.job_id, wait_seconds=1)
+                self.assertEqual(
+                    (result.status, result.exit_code, result.output),
+                    ("failed", 1, output),
+                )
+                self.assertEqual(await runtime.get(result.job_id), result)
+                await runtime.cleanup()
 
     async def test_background_terminal_result_is_consumed_by_get(self) -> None:
         backend = _FakeShellBackend(blocked=True)
@@ -156,8 +172,8 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(job, ShellJobResult)
         assert isinstance(job, ShellJobResult)
         self.assertEqual(job.status, "completed")
-        self.assertIsNone(job.output)
-        self.assertIsInstance(missing, ShellJobError)
+        self.assertEqual(job.output, "done\n")
+        self.assertEqual(missing, job)
         self.assertEqual(runtime.list(), [])
         await runtime.cleanup()
 
@@ -198,7 +214,7 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runtime.list()), 1)
         await runtime.cleanup()
 
-    async def test_concurrent_get_consumes_terminal_result_once(self) -> None:
+    async def test_concurrent_get_returns_same_terminal_result(self) -> None:
         backend = _FakeShellBackend(blocked=True)
         runtime = _runtime(backend)
         running = await runtime.start("long command")
@@ -210,15 +226,8 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
             runtime.get(running.job_id, wait_seconds=1),
         )
 
-        results = [first, second]
-        self.assertEqual(
-            sum(isinstance(result, ShellJobResult) for result in results),
-            1,
-        )
-        self.assertEqual(
-            sum(isinstance(result, ShellJobError) for result in results),
-            1,
-        )
+        self.assertEqual(first, second)
+        self.assertIsInstance(first, ShellJobResult)
         await runtime.cleanup()
 
     async def test_cancel_consumes_confirmed_terminal_job(self) -> None:
@@ -234,7 +243,7 @@ class ShellJobRuntimeTest(unittest.IsolatedAsyncioTestCase):
         assert isinstance(cancelled, ShellJobResult)
         self.assertEqual(cancelled.status, "cancelled")
         self.assertEqual(backend.cancelled, [running.job_id])
-        self.assertIsInstance(missing, ShellJobError)
+        self.assertEqual(missing, cancelled)
         await runtime.cleanup()
 
     async def test_cancelled_foreground_wait_publishes_running_job(self) -> None:

@@ -1,5 +1,6 @@
 """Agent 工作区图片查看工具及其请求契约。"""
 
+from collections.abc import Callable
 from typing import Literal
 
 from langchain.tools import tool
@@ -40,10 +41,12 @@ def supports_view_image_tool(model: BaseChatModel) -> bool:
     return bool(model.profile and model.profile.get("image_tool_message"))
 
 
-def create_view_image_tool(working_directory: str) -> BaseTool:
+def create_view_image_tool(
+    working_directory: str, freeze_file: Callable[[str], str]
+) -> BaseTool:
     """创建图片查看请求工具。
 
-    工具结果只持久化图片路径。MessageContextMiddleware 会在下一次
+    工具结果持久化固定版本的图片路径。MessageContextMiddleware 会在下一次
     模型调用前读取该请求，把图片内容临时投影到 ToolMessage 副本中，避免
     base64 图片进入 LangGraph Checkpoint。
     """
@@ -62,6 +65,21 @@ def create_view_image_tool(working_directory: str) -> BaseTool:
                 "code": "unsupported_image_type",
                 "path": request.f_path,
             }
-        return request.model_dump(mode="json")
+        try:
+            return ImageViewRequest(f_path=freeze_file(path)).model_dump(mode="json")
+        except (OSError, SandboxPathError) as exc:
+            return {"status": "error", "code": "snapshot_failed", "error": str(exc)}
 
     return view_image
+
+
+def create_freeze_tool(freeze_file: Callable[[str], str]) -> BaseTool:
+    @tool("freeze_artifact")
+    def freeze_artifact(f_path: str) -> dict[str, str]:
+        """固定交接或交付文件的当前版本，返回其他 Agent 可读取的只读路径。"""
+        try:
+            return {"status": "success", "path": freeze_file(f_path)}
+        except (OSError, SandboxPathError) as exc:
+            return {"status": "error", "error": str(exc)}
+
+    return freeze_artifact

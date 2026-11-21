@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_PATH = PROJECT_ROOT.parent / "web" / "src" / "api" / "generated.ts"
+OUTPUT_PATH = PROJECT_ROOT.parent / "frontend" / "src" / "api" / "generated.ts"
 HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head")
 PARAMETER_LOCATIONS = ("path", "query", "header", "cookie")
 
@@ -27,7 +27,7 @@ def main() -> int:
     args = parser.parse_args()
     generated = _render_openapi_types(_load_openapi())
     if args.check:
-        if not OUTPUT_PATH.exists() or OUTPUT_PATH.read_text() != generated:
+        if not OUTPUT_PATH.exists() or OUTPUT_PATH.read_text(encoding="utf-8") != generated:
             print(
                 "OpenAPI TypeScript contract is stale; run "
                 "uv run python scripts/development/generate_openapi_types.py",
@@ -36,7 +36,7 @@ def main() -> int:
             return 1
         return 0
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(generated)
+    OUTPUT_PATH.write_text(generated, encoding="utf-8")
     return 0
 
 

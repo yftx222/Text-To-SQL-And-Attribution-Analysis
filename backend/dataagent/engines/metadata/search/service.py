@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 from loguru import logger
+from dataagent.engines.common.observability import evaluation
 
 from dataagent.engines.contract.search import SearchHit
 from dataagent.engines.identity.contracts import AssetAccessPolicy
@@ -157,7 +158,13 @@ class SemanticResourceService:
             policy,
         )
         await self._retrieve(context)
-        return self._build_response(context)
+        response = self._build_response(context)
+        if evaluation.observe is not None:
+            evaluation.emit("recall_context", terms=request.terms, types=request.resource_types,
+                            columns=[[item.t_name, item.name] for item in response.columns],
+                            metrics=[item.name for item in response.metrics],
+                            failures=[item.model_dump(mode="json") for item in response.failures])
+        return response
 
     def _create_context(
         self,
@@ -349,6 +356,10 @@ class SemanticResourceService:
                         score=hit.score,
                     ),
                 )
+            if evaluation.observe is not None:
+                evaluation.emit("recall_channel", term=term, resource_type="value", channel="fulltext",
+                                keys=list(dict.fromkeys((h.item.t_name, h.item.c_name, h.item.value) for h in result
+                                    if (h.item.t_name, h.item.c_name) in allowed_columns and context.catalog.columns[h.item.t_name, h.item.c_name].index_values)))
 
     async def _run_index_query(
         self,
@@ -383,6 +394,9 @@ class SemanticResourceService:
                 )
                 continue
             seen_keys: set[KeyT] = set()
+            if evaluation.observe is not None:
+                evaluation.emit("recall_channel", term=term, resource_type=resource_type, channel=match_type,
+                                keys=list(dict.fromkeys(k for h in result if (k := key_of(h.item)) in allowed_keys)))
             for rank, hit in enumerate(result, start=1):
                 key = key_of(hit.item)
                 if key not in allowed_keys or key in seen_keys:

@@ -34,8 +34,24 @@ if TYPE_CHECKING:
     from dataagent.engines.assistant.recall.service import SemanticRecallService
 
 
-def create_semantic_recall_tools(recall: SemanticRecallService) -> list[BaseTool]:
+def create_semantic_recall_tools(
+    recall: SemanticRecallService, *, ontology=None, session_key=None
+) -> list[BaseTool]:
     """请求模型由工具框架校验，业务编排由召回用例承担。"""
+
+    async def attach_bundle(payload, query, terms=()):
+        if ontology is None:
+            return payload
+        payload["ontology"] = None
+        if any(
+            word in " ".join([query, *terms]).lower()
+            for word in ("复发", "同类故障", "故障追溯", "recurrent", "mfg_fault")
+        ):
+            try:
+                payload["ontology"] = await ontology.bundle(session_key)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("售后本体包不可用: {}", type(exc).__name__)
+        return payload
 
     @tool(args_schema=RecallContextRequest)
     async def recall_context(
@@ -60,7 +76,7 @@ def create_semantic_recall_tools(recall: SemanticRecallService) -> list[BaseTool
             )
         except Exception as exc:  # noqa: BLE001
             return _recall_error("语义资源召回失败", exc)
-        return semantic_recall_update(record)
+        return await attach_bundle(semantic_recall_update(record), query, terms)
 
     @tool(args_schema=ListRecallsRequest)
     async def list_recalls(config: RunnableConfig, limit: int = 20) -> dict[str, Any]:
@@ -92,7 +108,11 @@ def create_semantic_recall_tools(recall: SemanticRecallService) -> list[BaseTool
             return _recall_error(
                 "加载语义召回记录失败", exc, missing_message="未找到指定的语义召回记录"
             )
-        return semantic_recall_payload(record)
+        return await attach_bundle(
+            semantic_recall_payload(record),
+            query,
+            record.request.terms if record.request else (),
+        )
 
     @tool(args_schema=MergeRecallsRequest)
     async def merge_recalls(
@@ -110,7 +130,9 @@ def create_semantic_recall_tools(recall: SemanticRecallService) -> list[BaseTool
                 exc,
                 missing_message="未找到待合并的语义召回记录",
             )
-        return semantic_recall_payload(record)
+        return await attach_bundle(
+            semantic_recall_payload(record), target_query, (source_query,)
+        )
 
     @tool(args_schema=DeleteRecallsRequest)
     async def delete_recalls(
@@ -131,6 +153,7 @@ def create_semantic_recall_tools(recall: SemanticRecallService) -> list[BaseTool
             "recalls": [
                 {
                     "status": "deleted" if deletion.deletes_entire_query else "updated",
+                    **({"ontology": None} if ontology is not None else {}),
                     **deletion.model_dump(mode="json", exclude_defaults=True),
                 }
                 for deletion in deletions
@@ -195,9 +218,13 @@ def semantic_recall_payload(
         "query_experiences": [
             experience.model_dump(
                 mode="json",
+                exclude_none=True,
                 include={
                     "id": True,
                     "purpose": True,
+                    "execution_id": True,
+                    "metric": True,
+                    "data_scope": True,
                     "sql_template": True,
                     "assets": {"__all__": {"kind", "database", "table", "column"}},
                 },

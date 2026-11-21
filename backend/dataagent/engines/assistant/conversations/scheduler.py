@@ -34,6 +34,13 @@ def enqueue_conversation_deletion(
 
 def _submit(name: str, args: list[object]) -> TaskSubmission:
     """按中央路由配置提交助手后台任务。"""
+    '''
+    将这些信息发送给 Redis，返回任务 ID，然后由 Celery Worker 取出任务并执行
+    标题生成任务进入lightweight 队列
+    后端 API 和 Worker 是两个独立进程。API 负责接收前端请求，Worker 负责执行后台工作。
+    API 将任务名称和参数放进 Redis，Worker 从 Redis 取出来，再调用自己代码中注册的函数。
+    Redis 负责保存、交接任务，执行者是 Worker。
+    '''
     task = celery_app.send_task(
         name,
         args=args,

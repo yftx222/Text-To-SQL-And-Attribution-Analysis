@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlglot import exp, parse_one
@@ -27,11 +26,6 @@ from dataagent.engines.query.repositories.experience_postgres import (
     QueryExperiencePGRepo,
 )
 
-if TYPE_CHECKING:
-    from dataagent.engines.query.experiences.scheduler import (
-        CeleryQueryExperienceIndexScheduler,
-    )
-
 
 @dataclass(frozen=True, slots=True)
 class QueryExecutionContext:
@@ -51,19 +45,19 @@ class QueryExecutionRecorder:
         self,
         execution_repo: QueryExecutionPGRepo,
         experience_repo: QueryExperiencePGRepo,
-        index_scheduler: CeleryQueryExperienceIndexScheduler,
         metadata: MetadataReader,
         *,
         data_source: str,
         database_name: str,
+        learn_from_queries: bool = True,
     ) -> None:
         """绑定执行记录、经验存储和索引调度依赖。"""
         self._execution_repo = execution_repo
         self._experience_repo = experience_repo
-        self._index_scheduler = index_scheduler
         self._metadata = metadata
         self._data_source = data_source
         self._database_name = database_name
+        self._learn_from_queries = learn_from_queries
 
     async def record_success(
         self,
@@ -73,18 +67,19 @@ class QueryExecutionRecorder:
         normalized_sql: str,
         validation: QueryValidationResult,
         result: AnalysisQueryResult,
-    ) -> UUID | None:
+    ) -> tuple[UUID, int] | None:
         """记录成功执行并增量更新相同结构的查询经验。"""
         execution = self._new_execution(context, raw_sql, "succeeded")
+        execution.id = result.execution_id
         execution.normalized_sql = normalized_sql
         execution.validation = validation.model_dump(mode="json")
         execution.result_summary = self._result_summary(result)
-        if validation.query_kind == "catalog":
+        if validation.query_kind == "catalog" or not self._learn_from_queries:
             async with self._experience_repo.session.begin():
                 await self._execution_repo.record(execution)
             return None
 
-        sql_template, fingerprint = _build_sql_template(normalized_sql)
+        sql_template, fingerprint = build_sql_template(normalized_sql)
         execution.sql_template = sql_template
         execution.fingerprint = fingerprint
         tables = {item.name for item in validation.tables}
@@ -110,10 +105,12 @@ class QueryExecutionRecorder:
                 experience,
                 assets,
             )
+            execution.result_summary["asset_versions"] = {
+                a.resource_key: a.meta_version for a in assets
+            }
             execution.experience_id = stored.id
             await self._execution_repo.record(execution)
-        self._index_scheduler.enqueue(stored.id, stored.revision)
-        return stored.id
+        return stored.id, stored.revision
 
     async def record_failure(
         self,
@@ -160,6 +157,7 @@ class QueryExecutionRecorder:
         """构造成功执行的持久化结果摘要。"""
         return {
             "path": result.path,
+            "sha256": result.sha256,
             "columns": [item.model_dump(mode="json") for item in result.columns],
             "row_count": result.row_count,
             "time_range": {
@@ -224,7 +222,7 @@ class QueryExecutionRecorder:
         return assets
 
 
-def _build_sql_template(sql: str) -> tuple[str, str]:
+def build_sql_template(sql: str) -> tuple[str, str]:
     """将 SQL 字面量替换为参数并生成稳定结构指纹。"""
     expression = parse_one(sql, read="doris")
     parameter_index = 0

@@ -6,9 +6,9 @@ from uuid import UUID, uuid4
 from sqlalchemy import delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
-from dataagent.engines.query.models.execution import QueryExecution
+from dataagent.engines.query.models.execution import QueryExecution, QueryReview
 from dataagent.engines.query.models.experience import (
     QueryExperience,
     QueryExperienceAsset,
@@ -130,6 +130,33 @@ class QueryExperiencePGRepo:
         )
         by_id = {item.id: item for item in result.unique().all()}
         return [by_id[item_id] for item_id in experience_ids if item_id in by_id]
+
+    async def approved_examples(self, ids: list[UUID]) -> dict:
+        """只取已有通过判定且同一执行没有否决记录的样例。"""
+        if not ids:
+            return {}
+        rejected = aliased(QueryReview)
+        rows = await self._session.execute(
+            select(QueryExecution, QueryReview)
+            .join(QueryReview, QueryReview.execution_id == QueryExecution.id)
+            .where(
+                QueryExecution.experience_id.in_(ids),
+                QueryReview.passed.is_(True),
+                ~exists().where(
+                    rejected.execution_id == QueryExecution.id,
+                    rejected.passed.is_(False),
+                ),
+            )
+            .distinct(QueryExecution.experience_id)
+            .order_by(
+                QueryExecution.experience_id,
+                QueryReview.created_at.desc(),
+                QueryExecution.id.desc(),
+            )
+        )
+        return {
+            execution.experience_id: (execution, review) for execution, review in rows
+        }
 
     async def list_overviews(
         self,

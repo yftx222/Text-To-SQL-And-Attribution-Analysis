@@ -64,6 +64,7 @@ class SemanticRecallService:
                 SemanticRecallAuthorization(
                     policy, cfg.query.data_source, cfg.doris.database
                 ),
+                refresh_examples=self.query.refresh_examples,
                 query_experience_role_name=policy.role_name,
                 query_experience_authorization_fingerprint=policy.authorization_fingerprint,
             )
@@ -81,7 +82,7 @@ class SemanticRecallService:
                 cached = await service.get_fresh_query_experiences(
                     user_id, conversation_id, query
                 )
-            if cached is not None:
+            if cached is not None and cached[0]:
                 return cached
             if policy.role_name is None or policy.authorization_fingerprint is None:
                 return [], datetime.now(UTC)

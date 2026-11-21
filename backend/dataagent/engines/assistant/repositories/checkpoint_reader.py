@@ -15,6 +15,7 @@ from langgraph._internal._constants import ERROR, INTERRUPT, NULL_TASK_ID, TASKS
 from langgraph.channels import BinaryOperatorAggregate, EphemeralValue, Topic
 from langgraph.channels.base import BaseChannel
 from langgraph.channels.delta import DeltaChannel
+from langgraph.channels.last_value import LastValue
 from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
 from langgraph.constants import START
 from langgraph.pregel._algo import prepare_next_tasks, task_path_str
@@ -22,7 +23,7 @@ from langgraph.pregel._checkpoint import achannels_from_checkpoint
 from langgraph.pregel._read import PregelNode
 from langgraph.types import PregelTask, Send
 
-_READ_CHANNELS = frozenset({"messages", "delegation_records"})
+_READ_CHANNELS = frozenset({"messages", "delegation_records", "current_delegation_id"})
 _BRANCH_PREFIX = "branch:to:"
 
 
@@ -113,6 +114,7 @@ def _channel_specs(
     if include_business:
         specs.update(
             messages=DeltaChannel(cast(Any, _messages_delta_reducer), list),
+            current_delegation_id=LastValue(str),
             delegation_records=BinaryOperatorAggregate(dict, operator.or_),
         )
     for channel in saved.checkpoint["channel_versions"]:

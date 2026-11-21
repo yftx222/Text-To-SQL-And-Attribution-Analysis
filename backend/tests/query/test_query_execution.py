@@ -2,6 +2,7 @@
 
 import asyncio
 import csv
+import hashlib
 import io
 import unittest
 from contextlib import asynccontextmanager
@@ -60,7 +61,13 @@ def rejected():
 
 def result():
     return AnalysisQueryResult(
-        path="/result.csv", columns=[], row_count=0, time_range={}, sample=[]
+        execution_id=uuid4(),
+        sha256="0" * 64,
+        path="/result.csv",
+        columns=[],
+        row_count=0,
+        time_range={},
+        sample=[],
     )
 
 
@@ -140,7 +147,7 @@ class QueryExecutionServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.guard = MagicMock(check=AsyncMock(return_value=valid()))
         self.recorder = MagicMock(
-            record_success=AsyncMock(),
+            record_success=AsyncMock(return_value=None),
             record_failure=AsyncMock(),
         )
         self.query_clients = MagicMock(
@@ -196,7 +203,7 @@ class QueryExecutionServiceTest(unittest.IsolatedAsyncioTestCase):
     async def test_success_record_failure_does_not_change_result(self):
         self.recorder.record_success.side_effect = OSError("record unavailable")
         actual = await self.execute()
-        self.assertIs(actual, self.service.execute.return_value)
+        self.assertEqual(actual.audit_status, "missing")
         args = self.recorder.record_success.call_args
         self.assertEqual(args.args[0].session_key, self.key)
         self.assertEqual(args.args[0].role_name, "reader")
@@ -206,8 +213,49 @@ class QueryExecutionServiceTest(unittest.IsolatedAsyncioTestCase):
             self.key, "SELECT 1 AS value", purpose="统计"
         )
         self.assertIs(args.kwargs["validation"], self.guard.check.return_value)
-        self.assertIs(args.kwargs["result"], actual)
+        self.assertEqual(args.kwargs["result"].execution_id, actual.execution_id)
         self.recorder.record_failure.assert_not_awaited()
+
+    async def test_index_failure_preserves_committed_execution(self):
+        task = (uuid4(), 2)
+        self.recorder.record_success.return_value = task
+        self.handler._index_scheduler.enqueue.return_value = False
+        actual = await self.execute()
+        self.assertEqual(
+            (actual.audit_status, actual.index_status), ("committed", "retry_pending")
+        )
+        self.handler._index_scheduler.enqueue.assert_called_once_with(*task)
+        self.service.execute.assert_awaited_once()
+
+    async def test_delivery_matches_audit_scope_version_and_live_permissions(self):
+        output = result()
+        session = self.handler._postgres.session.return_value.__aenter__.return_value
+        row = SimpleNamespace(
+            status="succeeded",
+            user_id=self.key.user_id,
+            conversation_id=self.key.conversation_id,
+            analysis_id=self.key.analysis_id,
+            session_id=self.key.session_id,
+            role_name="reader",
+            authorization_fingerprint="a" * 64,
+            result_summary={"path": output.path, "sha256": output.sha256},
+        )
+        session.get = AsyncMock(return_value=row)
+
+        async def check():
+            return await self.handler.delivery_source_issue(
+                self.key, output.execution_id, output.path, output.sha256
+            )
+
+        self.assertIsNone(await check())
+        row.authorization_fingerprint = "previous"
+        self.assertIn("授权", await check())
+        row.result_summary["sha256"] = "different"
+        self.assertIn("版本", await check())
+        row.session_id = "another"
+        self.assertIn("不属于", await check())
+        session.get.return_value = None
+        self.assertIn("缺少", await check())
 
     async def test_rejection_never_creates_executor(self):
         self.guard.check.return_value = rejected()
@@ -287,7 +335,9 @@ class QueryExecutorTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.closed = True
 
-        async def write(user_id, conversation_id, path, content, *, session_scope):
+        async def write(
+            user_id, conversation_id, path, content, *, session_scope, execution_id
+        ):
             self.assertTrue(self.closed)
             relative_path = f"{session_scope.relative_workspace}/{path}"
             self.files.append((user_id, conversation_id, relative_path, content.read()))
@@ -323,8 +373,8 @@ class QueryExecutorTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sales", path)
         self.assertIn("explorer", path)
         self.assertIn("daily", path)
-        self.assertEqual(path.rsplit("/", 1)[-1], "统计.csv")
-        self.assertTrue(actual.path.endswith("/统计.csv"))
+        self.assertEqual(path.rsplit("/", 1)[-1], f"{actual.execution_id}_统计.csv")
+        self.assertTrue(actual.path.endswith(f"/{actual.execution_id}_统计.csv"))
         self.assertEqual(
             list(csv.reader(io.StringIO(content.decode()))),
             [["value"], ["1"], ["2"], ["3"]],
@@ -401,7 +451,20 @@ class QueryExecutorTest(unittest.IsolatedAsyncioTestCase):
                 actual = await self.service.execute(
                     self.key, "SELECT 1 AS value", purpose=purpose
                 )
-                self.assertEqual(actual.path.rsplit("/", 1)[-1], filename)
+                self.assertEqual(
+                    actual.path.rsplit("/", 1)[-1], f"{actual.execution_id}_{filename}"
+                )
+
+    async def test_same_purpose_reexecution_keeps_distinct_evidence(self):
+        first = await self.execute()
+        self.batches = [QueryBatch(("value",), ((4,),))]
+        second = await self.execute()
+        self.assertNotEqual(first.execution_id, second.execution_id)
+        self.assertNotEqual(first.path, second.path)
+        for index, result in enumerate((first, second)):
+            self.assertEqual(
+                result.sha256, hashlib.sha256(self.files[index][3]).hexdigest()
+            )
 
     async def test_empty_result_preserves_header_and_schema(self):
         self.batches = [QueryBatch(("value",), ())]
@@ -631,7 +694,6 @@ class QueryRecorderTest(unittest.IsolatedAsyncioTestCase):
             MagicMock(),
             MagicMock(),
             MagicMock(),
-            MagicMock(),
             data_source="doris",
             database_name="analytics",
         )
@@ -683,7 +745,6 @@ class QueryRecorderTest(unittest.IsolatedAsyncioTestCase):
                 recorder = QueryExecutionRecorder(
                     executions,
                     experiences,
-                    scheduler,
                     MagicMock(
                         asset_versions=AsyncMock(return_value=AssetVersions({}, {}))
                     ),
@@ -707,7 +768,7 @@ class QueryRecorderTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(execution.normalized_sql, validation.normalized_sql)
                 self.assertNotIn("sample", execution.result_summary)
                 if kind == "business":
-                    self.assertEqual(recorded, stored.id)
+                    self.assertEqual(recorded, (stored.id, 3))
                     experience = experiences.upsert_from_success.call_args.args[0]
                     self.assertEqual(
                         experience.authorization_fingerprint,
@@ -715,7 +776,6 @@ class QueryRecorderTest(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(experience.purposes, ["统计"])
                     self.assertIn(":p1", experience.sql_template)
-                    scheduler.enqueue.assert_called_once_with(stored.id, 3)
                 else:
                     self.assertIsNone(recorded)
                     experiences.upsert_from_success.assert_not_awaited()

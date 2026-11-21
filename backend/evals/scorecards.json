@@ -1,0 +1,93 @@
+{
+  "ORD-01": {
+    "orders": 206
+  },
+  "AMT-02": {
+    "gmv": "583047.83"
+  },
+  "PAY-04": {
+    "num": 191,
+    "den": 198,
+    "percent": "96.46",
+    "month_end_counts": [
+      1,
+      2
+    ]
+  },
+  "STA-04": {
+    "CANCELLED": 4,
+    "COMPLETED": 86,
+    "PAID": 8,
+    "SHIPPED": 3
+  },
+  "TRF-02": {
+    "uv": 1144
+  },
+  "SEA-05": {
+    "num": 945,
+    "den": 1383,
+    "percent": "68.33"
+  },
+  "INT-04": {
+    "removed": 26,
+    "cleared": 4
+  },
+  "USR-05": {
+    "num": 42,
+    "den": 148,
+    "percent": "28.38"
+  },
+  "PRD-04": {
+    "num": 196,
+    "den": 859,
+    "percent": "22.82"
+  },
+  "INV-06": {
+    "zero_skus": 2
+  },
+  "FUL-06": {
+    "num": 11,
+    "den": 189,
+    "percent": "5.82"
+  },
+  "REF-04": {
+    "paid": "583047.83",
+    "refund": "8282.22",
+    "net": "574765.61"
+  },
+  "MKT-04": {
+    "num": 23,
+    "den": 25,
+    "percent": "92.00"
+  },
+  "CMT-03": {
+    "num": 41,
+    "den": 48,
+    "percent": "85.42"
+  },
+  "XDM-01": {
+    "num": 206,
+    "den": 3230,
+    "percent": "6.38"
+  },
+  "ATT-01": {
+    "APP": "30979.85",
+    "PC": "-45964.99",
+    "MINI_PROGRAM": "-34765.35",
+    "H5": "15621.93",
+    "SEM": "-5417.62",
+    "ALL": "-39546.18",
+    "balanced": true,
+    "causal_limit": true,
+    "delivered": true
+  },
+  "CNV-01": {
+    "clarified": true,
+    "receivable": "649213.00"
+  },
+  "LIM-02": {
+    "orders": 206,
+    "coverage_disclosed": true,
+    "change_unavailable": true
+  }
+}

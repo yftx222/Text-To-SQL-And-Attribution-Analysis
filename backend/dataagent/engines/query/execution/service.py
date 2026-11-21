@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from loguru import logger
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 
 from dataagent.engines.contract.config import QueryConfig
 from dataagent.engines.identity import IdentityService
@@ -29,6 +32,7 @@ from dataagent.engines.query.execution.recorder import (
 from dataagent.engines.query.experiences.scheduler import (
     CeleryQueryExperienceIndexScheduler,
 )
+from dataagent.engines.query.models.execution import QueryExecution, QueryReview
 from dataagent.engines.query.repositories.doris import DorisQueryRepository
 from dataagent.engines.query.repositories.execution_postgres import QueryExecutionPGRepo
 from dataagent.engines.query.repositories.experience_postgres import (
@@ -131,14 +135,13 @@ class QueryExecutionService:
                 else validation,
             )
             raise
-        await self._record_success_safely(
+        return await self._record_success_safely(
             context,
             raw_sql=sql,
             normalized_sql=normalized_sql,
             validation=validation,
             result=result,
         )
-        return result
 
     async def _record_success_safely(
         self,
@@ -148,11 +151,11 @@ class QueryExecutionService:
         normalized_sql: str,
         validation: QueryValidationResult,
         result: AnalysisQueryResult,
-    ) -> None:
+    ) -> AnalysisQueryResult:
         """记录成功查询，审计写入失败时记录日志并保留查询结果。"""
         try:
             async with self._postgres.session() as session:
-                await self._recorder(session).record_success(
+                index_task = await self._recorder(session).record_success(
                     context,
                     raw_sql=raw_sql,
                     normalized_sql=normalized_sql,
@@ -161,6 +164,17 @@ class QueryExecutionService:
                 )
         except Exception:  # noqa: BLE001
             logger.exception("记录成功查询历史失败")
+            return result.model_copy(update={"audit_status": "missing"})
+        index_status = "not_requested"
+        if index_task is not None:
+            index_status = (
+                "queued"
+                if self._index_scheduler.enqueue(*index_task)
+                else "retry_pending"
+            )
+        return result.model_copy(
+            update={"audit_status": "committed", "index_status": index_status}
+        )
 
     async def _record_failure_safely(
         self,
@@ -188,13 +202,97 @@ class QueryExecutionService:
         except Exception:  # noqa: BLE001
             logger.exception("记录失败查询历史失败")
 
+    async def delivery_source_issue(
+        self, scope: QueryExecutionScope, execution_id: UUID, path: str, digest: str
+    ) -> str | None:
+        """核对源文件的审计归属，并按当前数据库身份重新检查授权指纹。"""
+        async with self._postgres.session() as session:
+            row = await session.get(QueryExecution, execution_id)
+            if not row or row.status != "succeeded" or not row.result_summary:
+                return "缺少已提交的成功查询审计。请核对本次 execute_sql 回执中的原始 CSV 路径和审计状态；若该次审计未提交，请重新执行对应查询后再发布。"
+            if (row.user_id, row.conversation_id, row.analysis_id, row.session_id) != (
+                scope.user_id,
+                scope.conversation_id,
+                scope.analysis_id,
+                scope.session_id,
+            ):
+                return "查询审计不属于当前用户、分析或 Session"
+            if (
+                row.result_summary.get("path") != path
+                or row.result_summary.get("sha256") != digest
+            ):
+                return "查询审计记录的文件版本与交付文件不一致"
+            role, fingerprint = row.role_name, row.authorization_fingerprint
+        principal = await self._identity.resolve_query_principal(scope.user_id)
+        if (role, fingerprint) != (
+            principal.role_name,
+            principal.authorization_fingerprint,
+        ):
+            return "当前查询角色或授权范围已变化，需要重新验证"
+        return None
+
+    async def record_query_review(
+        self,
+        scope: QueryExecutionScope,
+        execution_id: UUID,
+        path: str,
+        digest: str,
+        review_id: str,
+        *,
+        passed: bool,
+        metric: str,
+        data_scope: str,
+        reason: str,
+        evidence: list[str],
+        replaces_path: str | None,
+    ):
+        issue = await self.delivery_source_issue(scope, execution_id, path, digest)
+        if issue:
+            raise ValueError(issue)
+        async with self._postgres.session() as session, session.begin():
+            previous = None
+            if replaces_path:
+                previous = await session.scalar(
+                    select(QueryExecution.id)
+                    .join(QueryReview, QueryExecution.id == QueryReview.execution_id)
+                    .where(
+                        QueryExecution.user_id == scope.user_id,
+                        QueryExecution.conversation_id == scope.conversation_id,
+                        QueryExecution.analysis_id == scope.analysis_id,
+                        QueryExecution.session_id == scope.session_id,
+                        QueryExecution.id != execution_id,
+                        QueryExecution.result_summary["path"].as_string()
+                        == replaces_path,
+                        QueryReview.passed.is_(False),
+                    )
+                    .limit(1)
+                )
+                if previous is None:
+                    raise ValueError("修补来源必须是同一任务中已被否决的 SQL 版本")
+            await session.execute(
+                insert(QueryReview)
+                .values(
+                    execution_id=execution_id,
+                    review_id=review_id,
+                    passed=passed,
+                    metric=metric,
+                    data_scope=data_scope,
+                    reason=reason,
+                    evidence=evidence,
+                    replaces_id=previous,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=[QueryReview.execution_id, QueryReview.review_id]
+                )
+            )
+
     def _recorder(self, session: AsyncSession) -> QueryExecutionRecorder:
         """使用本次查询会话组装执行记录与经验聚合能力。"""
         return QueryExecutionRecorder(
             execution_repo=QueryExecutionPGRepo(session),
             experience_repo=QueryExperiencePGRepo(session),
-            index_scheduler=self._index_scheduler,
             metadata=self._metadata,
+            learn_from_queries=self._config.learn_from_queries,
             data_source=self._config.data_source,
             database_name=self._database_name,
         )

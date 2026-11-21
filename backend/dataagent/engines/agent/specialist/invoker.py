@@ -15,6 +15,7 @@ from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
 from langgraph.graph.state import CompiledStateGraph
 
 from dataagent.engines.agent.common.shell_jobs import ShellJobRuntime
+from dataagent.engines.agent.specialist.outcome import task_outputs
 from dataagent.engines.assistant.contracts import (
     DELEGATION_CONTEXT_KEY,
     DelegationCheckpointRecord,
@@ -23,6 +24,7 @@ from dataagent.engines.assistant.contracts import (
     DelegationResult,
     SubagentRunStatus,
 )
+from dataagent.engines.assistant.contracts.sessions import TaskOutcome
 from dataagent.engines.assistant.events import (
     SubagentActivityWriter,
     SubagentMessageActivity,
@@ -33,6 +35,7 @@ from dataagent.engines.assistant.events import (
 from dataagent.engines.assistant.execution.activity import SessionActivity
 from dataagent.engines.assistant.messages.stream import MessageDeltaParser
 from dataagent.engines.assistant.models.session import AgentSessionKey
+from dataagent.engines.assistant.repositories.budget import BudgetExceeded
 from dataagent.engines.assistant.repositories.session import SessionCheckpointRepository
 from dataagent.engines.assistant.sessions.checkpoint_view import (
     SpecialistCheckpointView,
@@ -60,6 +63,8 @@ class DelegationExecutor:
     def __init__(
         self,
         *,
+        budget,
+        record_review: Callable[[DelegationRequest, DelegationResult], Awaitable[None]],
         build_agent: Callable[[AgentSessionKey], Awaitable[SpecialistAgentRun]],
         session_store: SessionCheckpointRepository,
         control: SessionControl,
@@ -70,6 +75,8 @@ class DelegationExecutor:
         max_sessions: int,
     ) -> None:
         """绑定委派执行依赖，并设置当前会话的并行与 Session 容量限制。"""
+        self._budget = budget
+        self._record_review = record_review
         self._build_agent = build_agent
         self._session_store = session_store
         self._control = control
@@ -137,6 +144,11 @@ class DelegationExecutor:
             request.session_id,
         )
         config = self.build_subagent_config(parent_config, session_key)
+        if config.get("callbacks"):
+            config["metadata"] = {
+                **(config.get("metadata") or {}), "agent_type": request.agent_type,
+                "session_id": request.session_id, "delegation_id": delegation_id,
+            }
         try:
             async with (
                 self._control.lock(session_key),
@@ -152,6 +164,9 @@ class DelegationExecutor:
                     delegation_id,
                 )
                 if replayed_result is not None:
+                    await self._budget.finish(
+                        self._conversation_id, request, delegation_id, replayed_result
+                    )
                     self._write_status_activity(
                         request,
                         delegation_id,
@@ -159,6 +174,10 @@ class DelegationExecutor:
                         activity_writer,
                     )
                     return replayed_result
+                seconds = await self._budget.reserve(
+                    self._conversation_id, request, delegation_id
+                )
+                result = None
                 with self._activity.track(session_key):
                     if activity_writer is not None:
                         activity_started = True
@@ -172,13 +191,19 @@ class DelegationExecutor:
                             )
                         )
                     try:
-                        result = await self._invoke_specialist(
-                            request,
-                            session_key,
-                            config,
-                            delegation_id,
-                            activity_writer,
+                        async with asyncio.timeout(seconds):
+                            result = await self._invoke_specialist(
+                                request,
+                                session_key,
+                                config,
+                                delegation_id,
+                                activity_writer,
+                            )
+                    except TimeoutError as exc:
+                        self._write_status_activity(
+                            request, delegation_id, "failed", activity_writer
                         )
+                        raise BudgetExceeded("本次委派执行时间已达预算上限") from exc
                     except Exception:
                         self._write_status_activity(
                             request,
@@ -187,6 +212,10 @@ class DelegationExecutor:
                             activity_writer,
                         )
                         raise
+                    finally:
+                        await self._budget.finish(
+                            self._conversation_id, request, delegation_id, result
+                        )
                 self._write_status_activity(
                     request,
                     delegation_id,
@@ -210,6 +239,16 @@ class DelegationExecutor:
                     delegation_id,
                     "failed",
                     activity_writer,
+                )
+            if isinstance(exc, BudgetExceeded):
+                return DelegationResult(
+                    status="failed",
+                    analysis_id=request.analysis_id,
+                    agent_type=request.agent_type,
+                    session_id=request.session_id,
+                    delegation_id=delegation_id,
+                    failure_code="budget_exhausted",
+                    content=str(exc),
                 )
             return self._failed_result(
                 request,
@@ -263,18 +302,28 @@ class DelegationExecutor:
             running_record = DelegationCheckpointRecord(
                 delegation_id=delegation_id,
                 status="running",
+                task=request,
             )
             output = await self._stream_specialist(
                 agent_run.agent,
                 {
                     "messages": [
                         HumanMessage(
-                            content=request.message,
+                            content=request.message
+                            + (
+                                "\n任务验收与固定输入 "
+                                + request.model_dump_json(
+                                    include={"inputs", "acceptance"}
+                                )
+                                if request.inputs or request.acceptance
+                                else ""
+                            ),
                             additional_kwargs={
                                 DELEGATION_CONTEXT_KEY: context.model_dump(mode="json")
                             },
                         )
                     ],
+                    "current_delegation_id": delegation_id,
                     "delegation_records": {
                         delegation_id: running_record.model_dump(mode="json")
                     },
@@ -287,21 +336,38 @@ class DelegationExecutor:
             content = SpecialistCheckpointView(output).final_response(delegation_id)
             if not content or not content.strip():
                 raise RuntimeError("专业 Agent 未输出完整文本回答")
+            activity = SpecialistCheckpointView(output).delegation_activity(
+                delegation_id, active=False
+            )
+            outcome, outputs, query_outputs = task_outputs(
+                activity.messages if activity else []
+            )
+            if outcome is None:
+                outcome = TaskOutcome(
+                    verdict="blocked",
+                    checks={"业务验收": "缺少本轮结构化判定"},
+                    repair_target="请提交本轮检查结果和证据",
+                )
             result = DelegationResult(
+                delegation_id=delegation_id,
+                outcome=outcome,
+                outputs=outputs,
+                query_outputs=query_outputs,
                 status="completed",
                 analysis_id=request.analysis_id,
                 agent_type=request.agent_type,
                 session_id=request.session_id,
                 content=content,
             )
+            await self._record_review(request, result)
             await self._save_delegation_record(
-                agent_run.agent, config, delegation_id, result.status, result
+                agent_run.agent, config, delegation_id, result.status, request, result
             )
             return result
         except asyncio.CancelledError:
             if agent_run is not None:
                 await self._save_delegation_record(
-                    agent_run.agent, config, delegation_id, "cancelled"
+                    agent_run.agent, config, delegation_id, "cancelled", request
                 )
             raise
         except Exception as exc:
@@ -310,7 +376,7 @@ class DelegationExecutor:
                     request, "专家智能体会话执行失败", f"{type(exc).__name__}: {exc}"
                 )
                 await self._save_delegation_record(
-                    agent_run.agent, config, delegation_id, "failed", failure
+                    agent_run.agent, config, delegation_id, "failed", request, failure
                 )
             raise
         finally:
@@ -323,11 +389,12 @@ class DelegationExecutor:
         config: RunnableConfig,
         delegation_id: str,
         status: SubagentRunStatus,
+        request: DelegationRequest,
         result: DelegationResult | None = None,
     ) -> None:
         """将委派终态按统一结构写入 Checkpoint，保留同 Session 的其他记录。"""
         record = DelegationCheckpointRecord(
-            delegation_id=delegation_id, status=status, result=result
+            delegation_id=delegation_id, status=status, result=result, task=request
         )
         await agent.aupdate_state(
             config,

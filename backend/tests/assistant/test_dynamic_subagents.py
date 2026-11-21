@@ -145,6 +145,8 @@ async def _create_runtime(
         sandbox=sandbox,
         recall=MagicMock(),
         query=MagicMock(),
+        receipts=MagicMock(),
+        budget=MagicMock(),
         activity=SessionActivity(),
     )
     config = SimpleNamespace(
@@ -236,6 +238,8 @@ class _FakeAgent:
                     *messages,
                 ]
             channel_values["messages"] = messages
+            if "current_delegation_id" in input:
+                channel_values["current_delegation_id"] = input["current_delegation_id"]
             records = input.get("delegation_records")
             if isinstance(records, dict):
                 channel_values["delegation_records"] = {
@@ -516,6 +520,8 @@ def _service(
         conversation_id=_CONVERSATION_ID,
     )
     executor = DelegationExecutor(
+        record_review=AsyncMock(),
+        budget=SimpleNamespace(reserve=AsyncMock(return_value=600), finish=AsyncMock()),
         build_agent=build_agent,
         session_store=store,
         control=cast(Any, store),
@@ -650,9 +656,16 @@ class DynamicSubagentContractTest(unittest.TestCase):
                         "delete_recalls",
                         "execute_sql",
                         "mcp_web_search",
+                        "submit_task_result",
                     }
                     if kind == "explorer"
-                    else set(),
+                    else {
+                        "submit_task_result",
+                        {
+                            "analyst": "render_amount_comparison",
+                            "reviewer": "verify_amount_comparison",
+                        }[kind],
+                    },
                 )
                 mount = args["skill_mount"]
                 if kind == "analyst":
@@ -688,6 +701,7 @@ class DynamicSubagentContractTest(unittest.TestCase):
                         },
                     )
                     shell_backend = LocalShellBackend(root_dir=workspace)
+                    shell_backend.freeze_file = MagicMock()
                     cast(Any, shell_backend).workspace_dir = workspace
                     cast(Any, shell_backend).conversation_dir = workspace
                     cast(Any, shell_backend).shell_jobs = shell_backend
@@ -792,6 +806,7 @@ class DynamicSubagentContractTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as workspace:
             backend = LocalShellBackend(root_dir=workspace)
+            backend.freeze_file = MagicMock()
             cast(Any, backend).workspace_dir = workspace
             cast(Any, backend).conversation_dir = workspace
             planner_shell_jobs = MagicMock(spec=ShellJobRuntime)
@@ -805,6 +820,7 @@ class DynamicSubagentContractTest(unittest.TestCase):
                 backend=cast(Any, backend),
                 checkpointer=InMemorySaver(),
                 shell_jobs=planner_shell_jobs,
+                allow_shell=False,
             )
 
             state = graph.invoke(
@@ -830,7 +846,7 @@ class DynamicSubagentContractTest(unittest.TestCase):
                 "list_shell_jobs",
                 "get_shell_job",
                 "cancel_shell_job",
-            }.issubset(model.seen_tools)
+            }.isdisjoint(model.seen_tools)
         )
         self.assertIn("delegation", model.seen_tools)
         self.assertIn("list_sessions", model.seen_tools)
@@ -1747,6 +1763,22 @@ class AgentSessionServiceTest(unittest.IsolatedAsyncioTestCase):
                 {"type": "text", "text": "完成"},
             ],
         )
+
+    async def test_running_checkpoint_without_terminal_result_reenters_expert(self):
+        fake = _FakeAgent()
+        namespace = "subagents/sales-decline/analyst/region"
+        fake.state_values[namespace] = {
+            "delegation_records": {
+                "window": {"delegation_id": "window", "status": "running"}
+            }
+        }
+        result = await _service(fake).executor.execute_delegation(
+            _request("region"),
+            build_planner_config(12, _CONVERSATION_ID),
+            delegation_id="window",
+        )
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(fake.inputs), 1)
 
     async def test_replayed_delegation_reuses_saved_text_without_model_call(
         self,

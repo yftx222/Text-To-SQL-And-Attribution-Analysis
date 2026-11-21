@@ -27,10 +27,10 @@ def create_shell_tools(runtime: ShellJobRuntime) -> list[BaseTool]:
                 ),
             ),
         ],
-    ) -> str | dict[str, Any]:
+    ) -> dict[str, Any]:
         """运行 Shell 命令；前台截断输出附带路径，超时后返回后台 job_id。"""
         result = await runtime.start(command)
-        return result if isinstance(result, str) else _dump(result)
+        return _dump(result)
 
     @tool("list_shell_jobs")
     async def list_shell_jobs() -> list[dict[str, Any]]:
@@ -49,14 +49,14 @@ def create_shell_tools(runtime: ShellJobRuntime) -> list[BaseTool]:
             ),
         ] = 0,
     ) -> dict[str, Any]:
-        """查看或短暂等待 Shell Job；完整输出在 output_path，终态仅可读取一次。"""
+        """查看或短暂等待 Shell Job；完整输出在 output_path，终态可在当前 Run 内重复读取。"""
         return _dump(await runtime.get(job_id, wait_seconds=wait_seconds))
 
     @tool("cancel_shell_job")
     async def cancel_shell_job(
         job_id: Annotated[str, Field(min_length=1, description="shell 返回的 job_id")],
     ) -> dict[str, Any]:
-        """取消一个 Shell Job，并终止命令所属的整个进程组；终态会被消费。"""
+        """取消一个 Shell Job，并终止命令所属的整个进程组；终态可在当前 Run 内重复读取。"""
         return _dump(await runtime.cancel(job_id))
 
     return [shell, list_shell_jobs, get_shell_job, cancel_shell_job]

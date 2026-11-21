@@ -159,6 +159,7 @@ def test_conversation_snapshots_and_query_models_have_their_own_registries():
     assert QueryExperience.metadata is QueryBase.metadata
     assert set(QueryBase.metadata.tables) == {
         "query_executions",
+        "query_execution_reviews",
         "query_experiences",
         "query_experience_assets",
     }

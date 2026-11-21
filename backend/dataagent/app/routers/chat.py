@@ -1,11 +1,14 @@
 """对话管理、语义召回与 Agent SSE 流式交互路由。"""
 
+import json
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 
-from dataagent.app.dependencies import AnalysisUserDep, CurrentUserDep
+from dataagent.app.dependencies import AnalysisUserDep, CurrentUserDep, WebResourcesDep
+from dataagent.app.dependencies.assistant import ConversationPGRepoDep
 from dataagent.app.dependencies.chat import (
     ConversationServiceDep,
     ConversationTurnServiceDep,
@@ -13,6 +16,7 @@ from dataagent.app.dependencies.chat import (
 from dataagent.app.schemas import chat as chat_schema
 from dataagent.app.services.event_stream import _sse_response
 from dataagent.engines.assistant.contracts.base import Identifier
+from dataagent.engines.assistant.models.session import AgentSessionKey
 from dataagent.engines.common.observability import context
 from dataagent.engines.contract.analysis import AgentType
 
@@ -21,8 +25,11 @@ router = APIRouter(tags=["chat"])
 
 @router.post("/create", status_code=status.HTTP_201_CREATED)
 async def api_create_conversation(
+    # 前端传回来的数据
     body: chat_schema.CreateConversationRequest,
+    # ConversationService 实例，提供创建、删除、查询会话等方法
     conversations: ConversationServiceDep,
+    # 表示本次请求对应的、已通过认证及分析权限检查的用户
     current_user: AnalysisUserDep,
 ) -> chat_schema.ConversationResponse:
     """创建新对话。"""
@@ -127,7 +134,10 @@ async def api_stream_chat(
 ) -> StreamingResponse:
     """启动后台对话回合并订阅 Agent 事件。"""
     user_id = current_user.id
+    # 给当前执行上下文标记用户 ID，方便记录日志,当前异步执行流程随身携带的一项信息。
+    # 为不同异步上下文分别保存值，支持多个用户并发处理。
     context.user_id_ctx.set(str(user_id))
+    # 表示“开始处理这一轮问答”。events：一个可持续读取事件的异步生成器
     events = await turns.start(user_id, body.conversation_id, body.message)
     return _sse_response(body.conversation_id, events)
 
@@ -176,3 +186,47 @@ async def api_stop_conversation_run(
     """由用户显式停止 Conversation 当前的 Planner Run。"""
     await turns.stop(current_user.id, conversation_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{conversation_id}/ontology/{analysis_id}/{execution_id}/{file_kind}")
+async def ontology_evidence(
+    conversation_id: UUID,
+    analysis_id: Identifier,
+    execution_id: UUID,
+    file_kind: Literal["evidence", "evidence.csv"],
+    current_user: AnalysisUserDep,
+    resources: WebResourcesDep,
+    repository: ConversationPGRepoDep,
+):
+    """重新鉴权并核对摘要后，下载服务端保存的证据。"""
+    if resources.ontology is None:
+        raise HTTPException(404, "售后试点未启用")
+    if await repository.get(current_user.id, conversation_id) is None:
+        raise HTTPException(404, "会话不可用")
+    key = AgentSessionKey(
+        current_user.id, conversation_id, analysis_id, "reviewer", "download"
+    )
+    try:
+        if file_kind == "evidence.csv":
+            data = await resources.ontology.download_csv(key, execution_id)
+            return Response(
+                data,
+                media_type="text/csv; charset=utf-8",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{execution_id}.csv"',
+                    "Cache-Control": "no-store",
+                },
+            )
+        payload = await resources.ontology.read(key, execution_id)
+    except PermissionError as exc:
+        raise HTTPException(403, "无权读取该执行") from exc
+    except ValueError as exc:
+        raise HTTPException(409, "证据或本体版本无法验证") from exc
+    return Response(
+        json.dumps(payload, ensure_ascii=False),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{execution_id}.json"',
+            "Cache-Control": "no-store",
+        },
+    )

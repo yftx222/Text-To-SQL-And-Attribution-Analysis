@@ -6,6 +6,9 @@ _SHELL_JOB_WRAPPER_SCRIPT = r"""
 import base64
 import json
 import os
+import resource
+import selectors
+import time
 import secrets
 import signal
 import stat
@@ -72,6 +75,7 @@ def write_control(data):
 
 
 def demote_child():
+    resource.setrlimit(resource.RLIMIT_FSIZE, (max_file_bytes, max_file_bytes))
     os.setgroups([])
     os.setgid(owner_gid)
     os.setuid(owner_uid)
@@ -159,24 +163,39 @@ try:
     print("__DATAAGENT_SHELL_JOB_STARTED__", flush=True)
     retained = 0
     output_truncated = False
-    while True:
-        chunk = process.stdout.read(65536)
-        if not chunk:
-            break
-        remaining = max_file_bytes - retained
-        if remaining > 0:
-            written = chunk[:remaining]
-            view = memoryview(written)
-            while view:
-                count = os.write(log_fd, view)
-                view = view[count:]
-            retained += len(written)
-        if len(chunk) > max(remaining, 0):
-            output_truncated = True
+    deadline = time.monotonic() + payload["timeout_seconds"]
+    next_usage_check = 0
+    with selectors.DefaultSelector() as selector:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while True:
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise TimeoutError("Shell Job 达到总时限")
+            finished = process.poll() is not None and not selector.get_map() and not process_group_alive(process.pid)
+            if finished or time.monotonic() >= next_usage_check:
+                usage = subprocess.check_output(
+                    ["du", "-sx", "-B1", "--", payload["volume_root"]],
+                    timeout=min(remaining_time, 10),
+                )
+                if int(usage.split()[0]) > payload["storage_bytes"]:
+                    raise OSError("用户数据卷超过空间额度")
+                next_usage_check = time.monotonic() + 1
+            if finished:
+                break
+            if selector.select(min(0.2, remaining_time)):
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(process.stdout)
+                    continue
+                remaining = max_file_bytes - retained
+                written = chunk[:remaining]
+                view = memoryview(written)
+                while view:
+                    view = view[os.write(log_fd, view):]
+                retained += len(written)
+                if len(chunk) > remaining:
+                    output_truncated = True
     exit_code = process.wait()
-    while process_group_alive(process.pid):
-        import time
-        time.sleep(0.05)
     write_control(
         {
             "status": "finished",
@@ -199,7 +218,7 @@ except BaseException as error:
             )
         except BaseException:
             pass
-    if process is not None and process.poll() is None:
+    if process is not None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:

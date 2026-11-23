@@ -121,6 +121,27 @@ class Scenario:
 
 
 class DeliveryTests(IsolatedAsyncioTestCase):
+    async def test_report_review_can_use_sidecar_from_same_analyst_delegation(self):
+        case = Scenario()
+        source = case.task("explorer", "source", b"source rows")
+        report = case.task("analyst", "chart", b"chart bytes", [source])
+        record = case.states["orders", "analyst", "chart"]["delegation_records"][report.delegation_id]
+        data = b"chart calculation"
+        name = f"{uuid4()}_{hashlib.sha256(data).hexdigest()}.csv"
+        case.files["evidence/" + name] = data
+        sidecar = report.model_copy(update={"path": f"/data/.evidence-{case.cid}/{name}"})
+        case.task("reviewer", "audit", b"independent proof", [report, source, sidecar])
+        record["result"]["outputs"].append(sidecar.path)
+        assert (await case.publish(report))["status"] == "needs_revision"
+        record["result"]["outcome"]["evidence"].append(sidecar.path)
+        receipt = await case.publish(report)
+        assert receipt["status"] == "verified"
+        assert {r["path"] for r in receipt["sources"]} == {report.path, sidecar.path, source.path}
+        # A sidecar remains ineligible for separate publication without its own review.
+        assert (await case.publish(sidecar))["status"] == "needs_revision"
+        record["task"]["inputs"].append(report.model_dump())
+        assert "循环依赖" in (await case.publish(report))["reason"]
+
     async def test_report_sources_checked_before_analysis(self):
         case = Scenario()
         source = case.task("explorer", "source", b"206")

@@ -20,6 +20,8 @@ from uuid import uuid4
 
 from loguru import logger
 
+from dataagent.engines.common.observability import evaluation
+
 from dataagent.engines.query.contracts import (
     AnalysisQueryResult,
     QueryExecutionLimits,
@@ -122,10 +124,11 @@ class AnalysisQueryService:
             tempfile.TemporaryFile(mode="w+b") as temporary_file,
             TextIOWrapper(temporary_file, encoding="utf-8", newline="") as csv_file,
         ):
-            summary = await self._execute_to_csv(
-                csv_file,
-                normalized_sql,
-            )
+            evaluation.emit("sql_start", run=str(execution_id))
+            try:
+                summary = await self._execute_to_csv(csv_file, normalized_sql)
+            finally:
+                evaluation.emit("sql_end", run=str(execution_id))
             temporary_file.seek(0)
             digest = hashlib.file_digest(temporary_file, "sha256").hexdigest()
             temporary_file.seek(0)

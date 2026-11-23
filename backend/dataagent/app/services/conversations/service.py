@@ -47,6 +47,7 @@ class ConversationService:
         async with self._repository.session.begin():
             conversation = await self._repository.create(
                 user_id,
+                #创建临时标题
                 initial_conversation_title(body.initial_message),
                 is_draft=body.is_draft,
             )

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from dataagent.engines.assistant.errors import ConversationBusyError
-from dataagent.engines.assistant.execution.runs import ConversationRunService
 from dataagent.engines.assistant.recall.cleanup import RecallCleanupService
 from dataagent.engines.assistant.repositories.conversation import ConversationPGRepo
 from dataagent.engines.assistant.sessions.identity import (
@@ -20,6 +19,7 @@ from dataagent.engines.infra.errors import AdvisoryLockBusyError
 from dataagent.engines.infra.postgres_client_manager import PostgresClientManager
 
 if TYPE_CHECKING:
+    from dataagent.engines.assistant.execution.runs import ConversationRunService
     from dataagent.engines.assistant.execution.runtime_cache import AgentManager
     from dataagent.engines.infra.postgres_advisory_locks import PostgresAdvisoryLocks
     from dataagent.engines.sandbox import DockerSandboxManager

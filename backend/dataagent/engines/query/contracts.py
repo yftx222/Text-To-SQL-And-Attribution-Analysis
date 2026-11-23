@@ -195,15 +195,28 @@ ALL_OUTPUTS: tuple[Output, ...] = (
 )
 
 
-class SemanticQueryRequest(BaseModel):
+class _RecurrenceFilters(BaseModel):
+    device_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=500,
+        description="用户指定的设备编号；追问沿用仍有效的限定。空数组表示所有可见设备。",
+    )
+    customer_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=500,
+        description="用户指定的使用客户编号，按复发发生时归属。即使不确定是否可见，也原样传入。空数组表示所有可见客户。",
+    )
+
+
+class SemanticQueryRequest(_RecurrenceFilters):
     model_config = ConfigDict(extra="forbid", frozen=True)
     operation: Literal["trace_recurrent_faults"]
-    window_start: AwareDatetime
+    window_start: AwareDatetime = Field(
+        description="复发事件发生时间的起点（含），前事件及其修复可以早于此时。"
+    )
     window_end: AwareDatetime = Field(
         description="排他的结束瞬间，以次日零点表示包含整个末日"
     )
-    device_ids: tuple[str, ...] = Field(default=(), max_length=500)
-    customer_ids: tuple[str, ...] = Field(default=(), max_length=500)
     outputs: tuple[Output, ...] = Field(default=ALL_OUTPUTS, min_length=1)
     as_of: AwareDatetime | None = None
 
@@ -218,16 +231,15 @@ class SemanticQueryRequest(BaseModel):
         return self
 
 
-class SemanticMonthRequest(BaseModel):
+class SemanticMonthRequest(_RecurrenceFilters):
     """完整自然月，服务端按业务时区生成左闭右开的月份窗口。"""
 
     model_config = ConfigDict(extra="forbid")
     operation: Literal["trace_recurrent_faults"]
     month: str = Field(
-        pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$", description="自然月，例如 2026-10"
+        pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$",
+        description="复发事件发生的自然月（YYYY-MM）。前一次修复可以在上月。",
     )
-    device_ids: tuple[str, ...] = Field(default=(), max_length=500)
-    customer_ids: tuple[str, ...] = Field(default=(), max_length=500)
     outputs: tuple[Output, ...] = Field(default=ALL_OUTPUTS, min_length=1)
     as_of: AwareDatetime | None = None
 

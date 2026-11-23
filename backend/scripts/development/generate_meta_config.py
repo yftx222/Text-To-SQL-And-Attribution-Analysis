@@ -804,13 +804,26 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "搜索点击率",
-            "产生至少一次点击的搜索请求数除以成功搜索请求数",
+            "先按请求业务日期选择周期内成功的搜索请求，按 search_detail_id 去重作为分母。分子只计这些请求中，按相同 ID 关联到周期内至少一次点击的去重请求数。点击属于其他周期发起的请求时不计入",
             [
                 "dwd_traffic_search_di.search_detail_id",
                 "dwd_traffic_search_di.is_search_success",
                 "dwd_traffic_search_click_di.search_detail_id",
+                "dwd_traffic_search_di.biz_date",
+                "dwd_traffic_search_click_di.biz_date",
             ],
             ["搜索CTR"],
+        ),
+        m(
+            "会话下单率",
+            "分母为按 session_start_time 在周期内开始的去重 session_id。分子从上述会话中，按 session_id = source_session_id 关联周期内创建的订单，计数有订单的去重会话。最终比例用此交集数除以分母；包含随后取消的订单",
+            [
+                "dwd_traffic_session_di.session_id",
+                "dwd_traffic_session_di.session_start_time",
+                "dwd_trade_order_detail_di.source_session_id",
+                "dwd_trade_order_detail_di.order_create_time",
+            ],
+            ["会话到下单转化率"],
         ),
         m(
             "平均搜索点击位次",
@@ -1726,7 +1739,7 @@ def _build_metrics() -> list[dict[str, Any]]:
         ),
         m(
             "SKU动销率",
-            "分子按查询周期内的下单明细统计；对每单先取期末之前发生的最后一次状态（按 event_seq_no），剔除已取消订单，再按 sku_id 汇总 sku_qty，计数销量大于零的 SKU。分母为周期内曾在售的去重 sku_id：未删除且在售的版本满足 effective_start_time < 周期结束上界，且 effective_end_time > 周期起点（无失效时间视为仍有效）。按版本区间重叠判断，包含期内下架的 SKU",
+            "分子按查询周期内的下单明细统计；对每单先取期末之前发生的最后一次状态（按 event_seq_no），剔除已取消订单，再按 sku_id 汇总 sku_qty，计数销量大于零的 SKU。分母为周期内曾在售的去重 sku_id：未删除且在售的版本满足 effective_start_time < 周期结束上界，且 effective_end_time > 周期起点（无失效时间视为仍有效）。按版本区间重叠判断，包含期内下架的 SKU。符合上述条件的占位成员 sku_id=0 同样计入分母；仅在明确要求真实 SKU 时另行排除",
             [
                 "dwd_trade_order_detail_di.sku_id",
                 "dwd_trade_order_detail_di.sku_qty",

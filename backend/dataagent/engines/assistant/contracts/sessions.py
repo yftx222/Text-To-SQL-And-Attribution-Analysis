@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     Field,
     StringConstraints,
+    model_validator,
 )
 
 from dataagent.engines.assistant.contracts.base import (
@@ -49,6 +51,18 @@ class TaskOutcome(StrictProtocolModel):
     replaces_path: str | None = None
 
 
+class CalendarWindow(StrictProtocolModel):
+    start: date = Field(strict=False, description="业务起始日期（含）")
+    end: date = Field(strict=False, description="业务结束日期（不含）")
+    as_of_end: bool = Field(default=False, description="需要还原统计期末事件状态时设为 true；明确要求跟踪至今天时保持 false。")
+
+    @model_validator(mode="after")
+    def check_order(self):
+        if self.start >= self.end:
+            raise ValueError("结束日期必须晚于起始日期")
+        return self
+
+
 class DelegationRequest(StrictProtocolModel):
     """Delegation 是 Planner 向专业 Agent 发起的一次工作委派。
 
@@ -61,6 +75,14 @@ class DelegationRequest(StrictProtocolModel):
     message: NonEmptyText
     inputs: list[TaskInput] = Field(default_factory=list)
     acceptance: list[NonEmptyText] = Field(default_factory=list)
+    calendar_window: CalendarWindow | None = Field(
+        default=None,
+        description="普通 SQL 按整日、整月或整年统计时填写用户要求的起止日期，用于核对首要查询证据；全历史或本体操作可省略。",
+    )
+    sum_required: bool = Field(
+        default=False,
+        description="目标为对业务明细的数量或金额求总和时设为 true；明细去重和支付等资格条件保留，最后仍须汇总度量。单纯计行、计单或查已汇总值时省略。",
+    )
 
 
 class ListSessionsRequest(StrictProtocolModel):
@@ -77,11 +99,23 @@ class DeleteSessionRequest(StrictProtocolModel):
     session_id: Identifier
 
 
+class SemanticReceipt(StrictProtocolModel):
+    execution_id: UUID = Field(strict=False)
+    window_basis: Literal["recurrence_occurred_at"]
+    window_start: datetime = Field(strict=False)
+    window_end: datetime = Field(strict=False)
+    customer_ids: list[str]
+    device_ids: list[str]
+    unavailable_customer_ids: list[str]
+    summary: dict[str, int] | None
+    complete: bool
+
+
 class DelegationResult(StrictProtocolModel):
     """运行时记录的委派状态、Session 身份和 Agent 原始文本。"""
 
     status: Literal["completed", "failed"]
-    failure_code: Literal["budget_exhausted"] | None = None
+    failure_code: Literal["budget_exhausted", "specialist_type_error"] | None = None
     analysis_id: Identifier
     agent_type: AgentType
     session_id: Identifier
@@ -89,6 +123,9 @@ class DelegationResult(StrictProtocolModel):
     delegation_id: str | None = None
     outcome: TaskOutcome | None = None
     query_outputs: list[str] = Field(default_factory=list)
+    primary_sql: str | None = None
+    primary_values: dict[str, str] = Field(default_factory=dict)
+    semantic_receipts: list[SemanticReceipt] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
 
 

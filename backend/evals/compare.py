@@ -7,7 +7,7 @@ from .live_report import rows, save
 from .offline_score import read
 
 
-def compare(left, right):
+def compare(left, right, *, frozen_scoring=None):
     a, b = (read(p / "before.json") for p in (left, right))
     changed = [k for k in ("tables", "metadata", "es") if a[k] != b[k]]
     for folder, before in ((left, a), (right, b)):
@@ -25,7 +25,14 @@ def compare(left, right):
             )
             if after[k] != before[k]
         )
-    versions = [read(p / "manifest.json")["scoring_sha256"] for p in (left, right)]
+    versions = [
+        read(
+            p / ("fixed_plan.json" if frozen_scoring is not None else "manifest.json")
+        )["scoring_sha256"]
+        for p in (left, right)
+    ]
+    if frozen_scoring is not None and any(v != frozen_scoring for v in versions):
+        raise ValueError("两个版本的冻结评分器不同")
     scoring_files = (
         "scorecards.json",
         "pilot_cases.json",

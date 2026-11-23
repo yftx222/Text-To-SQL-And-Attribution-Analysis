@@ -25,11 +25,12 @@ class AgentSkillsTest(unittest.TestCase):
             self.assertEqual(str(analyst.target), "/skills/analyst")
             self.assertTrue(analyst.source.is_absolute())
             self.assertIn(
-                "name: analysis", (analyst.source / "analysis/SKILL.md").read_text()
+                "name: analysis",
+                (analyst.source / "analysis/SKILL.md").read_text(encoding="utf-8"),
             )
             self.assertIn(
                 "name: visualization",
-                (analyst.source / "visualization/SKILL.md").read_text(),
+                (analyst.source / "visualization/SKILL.md").read_text(encoding="utf-8"),
             )
 
     def test_prompts_load_outside_repository_and_render_runtime_values(self) -> None:

@@ -34,6 +34,7 @@ from dataagent.engines.agent.common.tools.view_image import (
     is_supported_image_path,
     supports_view_image_tool,
 )
+from dataagent.engines.agent.specialist.delivery_clock import closing_request
 from dataagent.engines.agent.specialist.outcome import task_outputs
 from dataagent.engines.assistant.contracts import (
     MESSAGE_CREATED_AT_KEY,
@@ -186,7 +187,7 @@ class MessageContextMiddleware(AgentMiddleware[Any, Any, Any]):
             for projected, original in zip(messages, request.messages, strict=True)
         ):
             request = request.override(messages=messages)
-        return _stamp_response(handler(request))
+        return _stamp_response(handler(closing_request(request, self._agent_name)))
 
     async def awrap_model_call(
         self,
@@ -220,16 +221,33 @@ class MessageContextMiddleware(AgentMiddleware[Any, Any, Any]):
             for projected, original in zip(messages, request.messages, strict=True)
         ):
             request = request.override(messages=messages)
-        return _stamp_response(await handler(request))
+        return _stamp_response(
+            await handler(closing_request(request, self._agent_name))
+        )
 
     def _terminal_response(self, messages):
-        if self._agent_name == "analyst":
-            return _submitted_report(messages)
+        if self._agent_name in {"analyst", "reviewer"}:
+            return _submitted_report(messages, self._agent_name)
+        if self._agent_name == "planner" and len(messages) >= 2:
+            call, receipt = messages[-2:]
+            if (
+                isinstance(call, AIMessage)
+                and len(call.tool_calls) == 1
+                and isinstance(receipt, ToolMessage)
+                and receipt.status != "error"
+                and receipt.name == "deliver_query_values"
+                and call.tool_calls[0]["id"] == receipt.tool_call_id
+                and call.tool_calls[0]["name"] == receipt.name
+                and isinstance(receipt.content, str)
+            ):
+                payload = json.loads(receipt.content)
+                if payload.get("status") == "delivered" and payload.get("answer"):
+                    return ModelResponse(result=[AIMessage(content=payload["answer"])])
         return _budget_stop(messages)
 
 
-def _submitted_report(messages):
-    """已提交并固定的本轮报告可以直接交 Planner 复核，无须再等模型复述。"""
+def _submitted_report(messages, role="analyst"):
+    """已提交的产物或独立复核回执可直接交回 Planner，仍由交付门校验。"""
     if not messages or not isinstance(last := messages[-1], ToolMessage):
         return None
     if last.name != "submit_task_result" or last.status == "error":
@@ -248,20 +266,35 @@ def _submitted_report(messages):
     if not outcome or outcome.verdict != "passed":
         return None
     reports = [
-        p for p in outcome.evidence if p in outputs and p.lower().endswith(".html")
+        p
+        for p in outcome.evidence
+        if p in outputs
+        and (role == "reviewer" or p.lower().endswith((".html", ".png", ".svg")))
     ]
     if not reports:
+        return None
+    if role == "reviewer" and not any(p not in outputs for p in outcome.evidence):
         return None
     checks = [f"{k}：{v}" for k, v in outcome.checks.items()]
     return ModelResponse(
         result=[
-            AIMessage(content="\n".join(["Analyst 已提交报告。", *reports, *checks]))
+            AIMessage(
+                content="\n".join(
+                    [
+                        "Reviewer 已提交复核结果。"
+                        if role == "reviewer"
+                        else "Analyst 已提交报告。",
+                        *reports,
+                        *checks,
+                    ]
+                )
+            )
         ]
     )
 
 
 def _budget_stop(messages):
-    """全部待执行委派均耗尽预算时，直接结束本回合并保留前序工具记录。"""
+    """当前批次均遇到不可重试错误时，直接结束本回合。"""
     reasons = []
     for message in reversed(messages):
         if not isinstance(message, ToolMessage):
@@ -272,10 +305,10 @@ def _budget_stop(messages):
             result = json.loads(message.content)
         except ValueError:
             return None
-        if (
-            not isinstance(result, dict)
-            or result.get("failure_code") != "budget_exhausted"
-        ):
+        if not isinstance(result, dict) or result.get("failure_code") not in {
+            "budget_exhausted",
+            "specialist_type_error",
+        }:
             return None
         reasons.append(f"{result['analysis_id']}：{result['content']}")
     if reasons:
@@ -426,6 +459,16 @@ def _file_references(
     """每次模型请求只解析一次附件路径与持久化图片请求。"""
     attachments: dict[str, str] = {}
     images: dict[int, ImageViewRequest] = {}
+    # Only the pending tool batch requests pixels for this model call. Earlier
+    # image receipts retain their frozen paths for an explicit second look.
+    last_non_tool = next(
+        (
+            i
+            for i in reversed(range(len(messages)))
+            if not isinstance(messages[i], ToolMessage)
+        ),
+        -1,
+    )
     for index, message in enumerate(messages):
         if isinstance(message, HumanMessage):
             context = _read_attachments(message)
@@ -448,7 +491,7 @@ def _file_references(
                             )
                         except SandboxPathError:
                             continue
-        elif isinstance(message, ToolMessage):
+        elif index > last_non_tool and isinstance(message, ToolMessage):
             request = _read_image_view_request(message)
             if request is not None:
                 try:

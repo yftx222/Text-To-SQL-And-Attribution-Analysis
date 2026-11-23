@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import bindparam, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -170,7 +170,7 @@ class OntologyService:
                 "operation": row.definition["operation"],
                 "rule": row.definition["rule"],
                 "timezone": row.definition["timezone"],
-                "time_window": "完整月份用 month；自定义窗口包含开始、不包含结束",
+                "time_window": "月份按后一次故障的发生时间归期，前序故障和修复可在窗口外。自定义窗口包含开始、不包含结束。",
                 "rule_summary": row.definition["rule_summary"],
                 "product_scope": row.definition["dataset_scope"],
                 "products": row.definition["products"],
@@ -209,6 +209,20 @@ class OntologyService:
                     dict(zip(batch.column_names, r, strict=True)) for r in batch.rows
                 )
         evidence = summarize(request.model_copy(update={"outputs": ALL_OUTPUTS}), rows)
+        unavailable = []
+        if request.customer_ids:
+            async with client.engine.connect() as conn:
+                visible = set(
+                    (
+                        await conn.execute(
+                            text(
+                                "SELECT customer_id FROM mfg_customer WHERE scope_id=:scope AND customer_id IN :customers"
+                            ).bindparams(bindparam("customers", expanding=True)),
+                            {"scope": scope, "customers": request.customer_ids},
+                        )
+                    ).scalars()
+                )
+            unavailable = sorted(set(request.customer_ids) - visible)
         requested_coverage = {k: evidence["coverage"][k] for k in request.outputs}
         execution_id = uuid4()
         manifest = {
@@ -223,6 +237,8 @@ class OntologyService:
             "dependencies": deps,
             "authorization_fingerprint": principal.authorization_fingerprint,
             "request": request.model_dump(mode="json"),
+            "window_basis": "recurrence_occurred_at",
+            "unavailable_customer_ids": unavailable,
             "source_read_at": started,
             "source_snapshot_id": None,
             "source_snapshot_supported": False,

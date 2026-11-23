@@ -13,12 +13,12 @@ from pydantic import (
     StringConstraints,
 )
 
-
+#继承BaseModel，FastAPI 看到这种声明，就会从 HTTP 请求体读取 JSON，校验后转换成这个对象
 class CreateConversationRequest(BaseModel):
     """创建对话请求。"""
 
     model_config = ConfigDict(extra="forbid")
-
+    #true：草稿会话。例如用户还没发送问题，但先上传了附件，系统需要提前创建一个会话来存放附件。
     is_draft: bool = Field(default=False, description="是否创建草稿对话")
     initial_message: str | None = Field(
         default=None,

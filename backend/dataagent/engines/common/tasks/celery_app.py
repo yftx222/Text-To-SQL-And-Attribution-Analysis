@@ -8,6 +8,7 @@ from dataagent.engines.contract.config import cfg
 
 TASK_VISIBILITY_TIMEOUT_SECONDS = cfg.task_queue.task_time_limit_seconds + 300
 
+#这里配置了 Redis 作为消息中转：
 celery_app = Celery(
     "dataagent",
     broker=cfg.task_queue.broker_url.get_secret_value(),

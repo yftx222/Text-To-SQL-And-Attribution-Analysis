@@ -102,7 +102,8 @@ class DeliveryGate:
             if target.agent_type == "reviewer":
                 raise DeliveryBlocked("请选择查询或分析产物")
             reviews: set[str] = set()
-            await self._verify_tree(analysis_id, target, tasks, visited, set(), reviews)
+            review_files: set[EvidenceKey] = set()
+            await self._verify_tree(analysis_id, target, tasks, visited, set(), reviews, review_files)
             receipt_id = uuid5(
                 self.conversation_id, analysis_id + "/" + target.model_dump_json()
             )
@@ -120,7 +121,7 @@ class DeliveryGate:
                         delegation_id=ident,
                         path=path,
                     ).model_dump()
-                    for role, session, ident, path in sorted(visited)
+                    for role, session, ident, path in sorted(visited | review_files)
                 ],
             }
             return await self.receipts.save(receipt_id, self.conversation_id, receipt)
@@ -158,7 +159,7 @@ class DeliveryGate:
                 }
             try:
                 await self._verify_tree(
-                    request.analysis_id, ref, tasks, visited, set(), set()
+                    request.analysis_id, ref, tasks, visited, set(), set(), set()
                 )
             except DeliveryBlocked as exc:
                 return {
@@ -198,6 +199,7 @@ class DeliveryGate:
         visited: set[EvidenceKey],
         ancestors: set[TaskKey],
         reviews: set[str],
+        review_files: set[EvidenceKey],
     ) -> None:
         key = (ref.agent_type, ref.session_id, ref.delegation_id)
         if tasks.latest.get(key[:2]) != key[2]:
@@ -284,11 +286,22 @@ class DeliveryGate:
             raise DeliveryBlocked("当前报告版本缺少独立复核")
         for review in bound_reviews:
             await self._review(review, ref)
-            dependencies.extend(review.task.inputs[1:])
+            for source in review.task.inputs[1:]:
+                if ref.agent_type == "analyst" and (
+                    source.agent_type, source.session_id, source.delegation_id
+                ) == key:
+                    # The reviewer may read both the chart and its sidecar from
+                    # one completed task. The sidecar is not another producer.
+                    if source.path not in result.outputs or source.path not in result.outcome.evidence:
+                        raise DeliveryBlocked("复核辅助文件缺少同一委派的固定产物或验收证据")
+                    await self._verify_bytes(source.path)
+                    review_files.add((*key, source.path))
+                else:
+                    dependencies.append(source)
             reviews.add(review.delegation_id)
         for source in dependencies:
             await self._verify_tree(
-                analysis_id, source, tasks, visited, ancestors | {key}, reviews
+                analysis_id, source, tasks, visited, ancestors | {key}, reviews, review_files
             )
         visited.add((*key, ref.path))
 
@@ -322,7 +335,7 @@ class DeliveryGate:
         declared = {source.path for source in record.task.inputs}
         if set(outcome.evidence).difference(declared, result.outputs):
             raise DeliveryBlocked("复核引用了未登记的证据")
-        independent = set(outcome.evidence).intersection(result.outputs) - {target.path}
+        independent = set(outcome.evidence).intersection(result.outputs) - declared
         if not independent:
             raise DeliveryBlocked("缺少 Reviewer 本轮生成的固定核对证据")
         for path in independent:

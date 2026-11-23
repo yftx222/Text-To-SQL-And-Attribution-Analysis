@@ -13,9 +13,12 @@ from dataagent.engines.common.async_runtime import run_async
 from dataagent.engines.contract.config import cfg
 from dataagent.engines.infra.postgres_client_manager import PostgresClientManager
 
+from .cohort_fixture import cohort_counts
+from .counterexamples import binding, check_record, suite
 from .metrics import recall_metrics, summarize
-from .offline_score import load_cards, read, score
+from .offline_score import load_cards, read, score, verdict
 from .pay_fixture import payment_counts
+from .process_score import evaluate
 from .score_replay import TABLE_SNAPSHOT, numeric_facts
 
 
@@ -170,10 +173,23 @@ def totals(traces):
     }
 
 
-def build(folder, group, audit, frozen):
+def build(folder, group, audit, frozen, review_notes=None):
+    fixed_plan = folder / "fixed_plan.json"
+    if fixed_plan.exists():
+        from .fixed_regression import scoring_hashes
+
+        hashes = scoring_hashes()
+        if hashes != read(fixed_plan)["scoring_sha256"]:
+            raise ValueError("判分程序与冻结版本不一致")
     root = folder / group
     manifest = read(root / "manifest.json")
+    first_pass = manifest.get("stage") == "first_pass"
     cards = load_cards()
+    if manifest.get("blind_cards"):
+        path = folder / "blind_cards.json"
+        if hashlib.sha256(path.read_bytes()).hexdigest() != manifest["blind_cards"]:
+            raise ValueError("盲测评分卡已变化")
+        cards = read(path)
     if manifest.get("rubric_cases"):
         from .catalog import catalog
 
@@ -188,6 +204,12 @@ def build(folder, group, audit, frozen):
     for r in rows(folder / "telemetry.jsonl"):
         trace_rows[r["trace"]].append(r)
     notes = read(root / "reviews.json") if (root / "reviews.json").exists() else {}
+    if review_notes is not None:
+        notes = review_notes
+    plan_path = folder / "counterexample_plan.json"
+    proof_path = root / "counterexamples.json"
+    plan = read(plan_path) if plan_path.exists() else {}
+    proofs = read(proof_path) if proof_path.exists() else {}
     rankings = read(root / "rankings.json") if (root / "rankings.json").exists() else []
     trials, scores = [], []
     for case in manifest["cases"]:
@@ -267,11 +289,26 @@ def build(folder, group, audit, frozen):
             for key, (value, evidence) in note["facts"].items():
                 if key not in {*cards[case]["facts"], "sql_scope"} or not evidence:
                     raise ValueError(f"{case} 标注缺少证据或字段未知")
-                if key == "sql_scope" and not any(sid in evidence for sid in sql_ids):
+                missing_query = (
+                    note.get("no_query") is True
+                    and value is False
+                    and complete
+                    and not my_sql
+                    and not any(
+                        t["name"] in ("execute_sql", "execute_semantic_query")
+                        for t in tools
+                    )
+                    and evidence.startswith(ref + "#")
+                )
+                if (
+                    key == "sql_scope"
+                    and not missing_query
+                    and not any(sid in evidence for sid in sql_ids)
+                ):
                     raise ValueError(f"{case} SQL 口径需要本次真实执行 ID")
                 if frozen:
                     facts[key] = (value, evidence)
-            if case == "PAY-04" and note.get("answer_sql"):
+            if not first_pass and case == "PAY-04" and note.get("answer_sql"):
                 query = next(r for r in my_sql if str(r["id"]) == note["answer_sql"])
                 try:
                     counts = payment_counts(
@@ -282,7 +319,93 @@ def build(folder, group, audit, frozen):
                 facts["month_end_counts"] = (counts, "audit.json#" + str(query["id"]))
                 if counts is not None and counts != [1, 2]:
                     facts["sql_scope"] = (False, "audit.json#" + str(query["id"]))
+        probe = None
+        if not first_pass and case in ("SEA-05", "XDM-01", "PAY-04"):
+            cited = [
+                q
+                for q in my_sql
+                if q["status"] == "succeeded"
+                and (
+                    str(q["id"]) == note.get("answer_sql")
+                    if note.get("answer_sql")
+                    else str(q["id"]) in final
+                )
+            ]
+            if len(cited) == 1:
+                q = cited[0]
+                try:
+                    observed = (
+                        payment_counts(
+                            q["raw_sql"],
+                            columns=note.get(
+                                "pay_columns",
+                                ("numerator_success_attempts", "denominator_attempts"),
+                            ),
+                        )
+                        if case == "PAY-04"
+                        else cohort_counts(case, q["raw_sql"])
+                    )
+                except (ValueError, sqlite3.Error):
+                    observed = None
+                probe = {
+                    "execution_id": str(q["id"]),
+                    "expected": [1, 2],
+                    "observed": observed,
+                }
+                if case == "PAY-04" and observed is not None and frozen:
+                    facts["month_end_counts"] = (observed, "audit.json#" + str(q["id"]))
+        contrast = "not_required" if first_pass else "review"
+        q = next(
+            (
+                s
+                for s in my_sql
+                if str(s["id"]) == note.get("answer_sql") and s["status"] == "succeeded"
+            ),
+            None,
+        )
+        columns = note.get("counterexample_columns")
+        if not first_pass and frozen and q and columns and case in plan:
+            variants = suite(plan, case)
+            fingerprint = binding(case, trial, note["sha256"], q, columns, variants)
+            contrast = check_record(proofs.get(case), fingerprint, columns, variants)
+            if contrast == "fail" or (contrast == "pass" and "sql_scope" not in facts):
+                facts["sql_scope"] = (
+                    contrast == "pass",
+                    f"counterexamples.json#{case} audit.json#{q['id']}",
+                )
+            if (
+                case == "PAY-04"
+                and contrast in ("pass", "fail")
+                and facts.get("month_end_counts", (None,))[0] is None
+            ):
+                evidence = proofs[case]["results"][0]["rows"]
+                if len(evidence) == 1:
+                    facts["month_end_counts"] = (
+                        [evidence[0][c] for c in columns],
+                        f"counterexamples.json#{case}",
+                    )
         scored, business, strict = score(cards[case], trial, facts)
+        error = note.get("final_error")
+        if error and frozen:
+            if (
+                not error.get("quote")
+                or error["quote"] not in final
+                or not error.get("reason")
+            ):
+                raise ValueError(f"{case} 终答错误缺少可核对的原文或理由")
+            scored.append(
+                {
+                    "case_id": case,
+                    "trial_id": trial,
+                    "assertion": "final_consistency",
+                    "expected": True,
+                    "observed": False,
+                    "status": "fail",
+                    "evidence": source + " " + error["reason"],
+                    "scorer": "review",
+                }
+            )
+            business = strict = "fail"
         scores.extend(scored)
         traces = [r for t in turns for r in trace_rows[t["trace"]]]
         submissions = [
@@ -315,6 +438,9 @@ def build(folder, group, audit, frozen):
                 }
             )
         trial_record = {
+            "counterexample_status": contrast,
+            "verified_delivery": verdict([strict, contrast]),
+            "boundary_probe": probe,
             "case": case,
             "trial": trial,
             "cid": cid,
@@ -340,7 +466,14 @@ def build(folder, group, audit, frozen):
         trials.append(trial_record)
     jsonl(root / "trials.jsonl", trials)
     jsonl(root / "scores.jsonl", scores)
+    if fixed_plan.exists():
+        save(root / "scoring_receipt.json", hashes)
     metrics = summarize(trials, scores)
+    process, _ = evaluate(folder, group)
+    save(root / "process_metrics.json", process)
+    metrics["process_rates"] = process["rates"]
+    metrics["cost"] = process["billing"]["total"]
+    metrics["billing"] = process["billing"]
     save(root / "metrics.json", metrics)
     started = [t for t in trials if t["started"]]
     spent = sum(t["usage"]["known_tokens"] for t in started)
@@ -360,8 +493,14 @@ def build(folder, group, audit, frozen):
         ),
         f"SQL 成功 {sql['succeeded']}/{sum(sql.values())} 次。供应商已报告 {spent:,} Token。",
         "",
-        "| 题目 | 业务 | 首次正确交付 | 秒 | 失败或待裁决项 |",
-        "|---|---|---|---:|---|",
+        (
+            f"按原题验收 {metrics['verified_delivery']['numerator']}/{len(started)} 通过；首测不执行反例。"
+            if first_pass
+            else f"原题和独立反例均通过 {metrics['verified_delivery']['numerator']}/{len(started)}。"
+        ),
+        "",
+        "| 题目 | 业务 | 首次正确交付 | 独立反例 | 最终验收 | 秒 | 失败或待裁决项 |",
+        "|---|---|---|---|---|---:|---|",
     ]
     for t in trials:
         issues = [
@@ -370,8 +509,12 @@ def build(folder, group, audit, frozen):
             if r["case_id"] == t["case"] and r["status"] != "pass"
         ]
         lines.append(
-            f"| {t['case']} | {t['business']} | {t['first_correct_delivery']} | {t['seconds']} | {', '.join(issues) or '—'} |"
+            f"| {t['case']} | {t['business']} | {t['first_correct_delivery']} | {t['counterexample_status']} | {t['verified_delivery']} | {t['seconds']} | {', '.join(issues) or '—'} |"
         )
+    for t in trials:
+        comment = notes.get(t["case"], {}).get("review_comment")
+        if comment:
+            lines.extend(["", f"{t['case']} 复核备注：{comment}"])
     lines.extend(["", "| 指标 | 分子 / 分母 | 比例 |", "|---|---:|---:|"])
     for name, key in (
         ("数字及分组", "numeric"),
@@ -389,6 +532,56 @@ def build(folder, group, audit, frozen):
         lines.append(
             f"| {name} | {metric['numerator']} / {metric['denominator']} | {percentage} |"
         )
+    lines.extend(
+        ["", "| 过程指标 | 已确认分子 / 已裁决分母 | 待裁决 |", "|---|---:|---:|"]
+    )
+    for key, label in (
+        ("recall_trigger", "首次检索触发"),
+        ("behavior", "满足工具行为约束"),
+        ("timeout", "客户端超时"),
+        ("extra_clarification", "额外追问"),
+        ("claim_supported", "结论有证据"),
+        ("fault_recovered", "注入故障后恢复"),
+        ("bad_version_published", "不合格版本放行"),
+        ("good_version_blocked", "合格版本误拦"),
+        ("repair_delivered", "拒绝后修补交付"),
+        ("acl_leak", "越权泄露"),
+        ("allowed_denied", "合法请求误拒"),
+    ):
+        m = process["rates"][key]
+        value = f"{m['numerator']} / {m['denominator']}" if m["denominator"] else "N/A"
+        lines.append(f"| {label} | {value} | {m['pending']} |")
+    lines.extend(
+        [
+            "",
+            f"待提取或复核结论清单的报告题 {process['claim_lists_missing']} 道。",
+            "[逐题过程、通道、耗时和计费依据](process_metrics.json)",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## SQL 业务口径复核",
+            "",
+            "| 题号 | 口径 | 执行依据 | 边界样本（实际 / 预期） |",
+            "|---|---|---|---|",
+        ]
+    )
+    for t in trials:
+        scope = next(
+            s
+            for s in scores
+            if s["trial_id"] == t["trial"] and s["assertion"] == "sql_scope"
+        )
+        probe = t.get("boundary_probe")
+        check = (
+            f"{probe['observed']} / {probe['expected']}"
+            if probe and probe["observed"] is not None
+            else "—"
+        )
+        lines.append(
+            f"| {t['case']} | {scope['status']} | {scope.get('evidence') or '待复核'} | {check} |"
+        )
     (root / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return trials
 
@@ -398,6 +591,9 @@ def main():
     p.add_argument("folder", type=Path)
     p.add_argument("--group", default="first")
     p.add_argument("--refresh-audit", action="store_true")
+    p.add_argument(
+        "--langfuse", action="store_true", help="本地评分落盘后同步到自托管 Langfuse"
+    )
     args = p.parse_args()
     root = args.folder / args.group
     cases = read(root / "manifest.json")["cases"]
@@ -420,7 +616,23 @@ def main():
     if (args.folder / "after.json").exists():
         after = read(args.folder / "after.json")
         frozen = frozen and before["tables"] == after["tables"]
-    build(args.folder, args.group, read(root / "audit.json"), frozen)
+    audit = read(root / "audit.json")
+    notes = None
+    if (
+        frozen
+        and read(root / "manifest.json").get("stage") != "first_pass"
+        and (args.folder / "counterexample_plan.json").exists()
+        and (args.folder / "after.json").exists()
+    ):
+        from . import auto_review, counterexamples
+
+        notes = auto_review.collect(args.folder, args.group, audit)
+        run_async(counterexamples.run(args.folder, args.group, notes))
+    build(args.folder, args.group, audit, frozen, notes)
+    if args.langfuse:
+        from .langfuse_export import publish
+
+        publish(args.folder, args.group, Path("conf/.env.langfuse"))
 
 
 if __name__ == "__main__":

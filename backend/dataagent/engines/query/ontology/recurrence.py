@@ -54,6 +54,26 @@ def compile_query(
                 *[exp.Literal.string(v) for v in request.device_ids]
             )
         )
+    if request.customer_ids:
+        ids = [exp.Literal.string(v) for v in request.customer_ids]
+        customer = exp.column("customer_id", table="o")
+        # Preserve unresolved ownership for coverage, within the requested visible cohort.
+        visible = (
+            exp.select("1")
+            .from_("mfg_customer")
+            .where(
+                exp.column("scope_id").eq(exp.Literal.string(authorized_scope)),
+                exp.column("customer_id").isin(*ids),
+            )
+        )
+        tree = tree.where(
+            exp.Exists(this=visible),
+            exp.or_(
+                customer.isin(*ids),
+                customer.is_(exp.Null()),
+                exp.column("relations", table="o").neq(1),
+            ),
+        )
     return tree.sql(dialect=dialect)
 
 

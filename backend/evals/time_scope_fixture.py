@@ -41,14 +41,73 @@ SKU = {
         [(100, 1000, 1, 11, 1, "2026-09-15", "2026-09-15 10:00:00")],
     ),
     "dwd_trade_order_status_event_di": (
-        "order_id after_order_status event_seq_no event_time biz_date",
+        "order_id after_order_status event_seq_no event_time biz_date order_status_event_id",
         [
-            (100, "PAID", 1, "2026-09-15 11:00:00", "2026-09-15"),
-            (100, "CANCELLED", 2, "2026-10-02 10:00:00", "2026-10-02"),
+            (100, "PAID", 1, "2026-09-15 11:00:00", "2026-09-15", 101),
+            (100, "CANCELLED", 2, "2026-10-02 10:00:00", "2026-10-02", 102),
         ],
     ),
     "dwd_trade_refund_detail_di": ("order_detail_id", []),
 }
+
+
+SEARCH_COHORT = {
+    "dwd_traffic_search_di": (
+        "search_detail_id is_search_success biz_date event_time",
+        [
+            (1, 1, "2026-09-03", "2026-09-03 08:00:00"),
+            (2, 1, "2026-09-03", "2026-09-03 08:30:00"),
+            (3, 1, "2026-08-31", "2026-08-31 23:59:00"),
+            (4, 0, "2026-09-03", "2026-09-03 09:00:00"),
+        ],
+    ),
+    "dwd_traffic_search_click_di": (
+        "search_click_id search_detail_id biz_date event_time",
+        [
+            (11, 1, "2026-09-03", "2026-09-03 08:01:00"),
+            (12, 1, "2026-09-03", "2026-09-03 08:02:00"),
+            (13, 3, "2026-09-01", "2026-09-01 00:01:00"),
+            (14, 4, "2026-09-03", "2026-09-03 09:01:00"),
+        ],
+    ),
+}
+
+SESSION_COHORT = {
+    "dwd_traffic_session_di": (
+        "session_id session_start_time biz_date",
+        [
+            (1, "2026-09-03 08:00:00", "2026-09-03"),
+            (2, "2026-09-03 08:30:00", "2026-09-03"),
+            (3, "2026-08-31 23:59:00", "2026-08-31"),
+        ],
+    ),
+    "dwd_trade_order_detail_di": (
+        "order_id order_detail_id source_session_id order_create_time biz_date",
+        [
+            (10, 100, 1, "2026-09-03 08:01:00", "2026-09-03"),
+            (10, 101, 1, "2026-09-03 08:01:00", "2026-09-03"),
+            (11, 110, 3, "2026-09-01 00:01:00", "2026-09-01"),
+            (12, 120, 2, "2026-10-01 00:01:00", "2026-10-01"),
+        ],
+    ),
+}
+
+
+def with_placeholder_sku():
+    """A, B and the on-sale placeholder qualify; only A has an effective sale."""
+    cols, versions = SKU["dim_sku_info_zip"]
+    placeholder = (
+        0,
+        0,
+        "在售",
+        0,
+        1,
+        "2026-01-01 00:00:00",
+        "9999-12-31 00:00:00",
+        0,
+        0,
+    )
+    return {**SKU, "dim_sku_info_zip": (cols, [*versions, placeholder])}
 
 
 def after_october_delisting():
@@ -88,7 +147,7 @@ def fixture_sql(sql, tables):
                 fields = []
                 for field, val in zip(names, row, strict=True):
                     typ = (
-                        "DATETIME"
+                        "DATETIME(6)"
                         if field.endswith("_time")
                         else "DATE"
                         if field == "biz_date"
@@ -96,6 +155,8 @@ def fixture_sql(sql, tables):
                         if field.endswith("_amount")
                         else "VARCHAR"
                         if "status" in field
+                        or field in ("session_id", "source_session_id")
+                        or isinstance(val, str)
                         else "BIGINT"
                     )
                     value = exp.cast(exp.convert(val), typ, dialect="doris")
@@ -123,7 +184,12 @@ async def replay(sql, tables):
     try:
         async with client.engine.connect() as con:
             return [
-                dict(row) for row in (await con.exec_driver_sql(statement)).mappings()
+                dict(row)
+                for row in (
+                    await con.exec_driver_sql(
+                        statement, execution_options={"no_parameters": True}
+                    )
+                ).mappings()
             ]
     finally:
         await client.close()
@@ -142,7 +208,16 @@ if __name__ == "__main__":
     parser.add_argument("execution", help="完整执行 ID")
     parser.add_argument(
         "resource",
-        choices=["payment", "sku", "sku-october", "amounts", "amounts-no-refunds"],
+        choices=[
+            "payment",
+            "sku",
+            "sku-october",
+            "sku-placeholder",
+            "search-cohort",
+            "session-cohort",
+            "amounts",
+            "amounts-no-refunds",
+        ],
     )
     args = parser.parse_args()
     audit = json.loads(args.audit.read_text(encoding="utf-8"))
@@ -155,6 +230,9 @@ if __name__ == "__main__":
     data = {
         "payment": PAYMENT,
         "sku": SKU,
+        "sku-placeholder": with_placeholder_sku(),
+        "search-cohort": SEARCH_COHORT,
+        "session-cohort": SESSION_COHORT,
         "sku-october": after_october_delisting(),
         "amounts": september_amounts(),
         "amounts-no-refunds": september_amounts(successful_refund=False),

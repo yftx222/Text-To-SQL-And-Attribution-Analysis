@@ -29,6 +29,7 @@ from dataagent.engines.metadata.contracts import (
     SemanticResourceRecallRequest,
     SemanticResourceType,
 )
+from dataagent.engines.query import supports_standard_query
 
 if TYPE_CHECKING:
     from dataagent.engines.assistant.recall.service import SemanticRecallService
@@ -210,9 +211,16 @@ def semantic_recall_payload(
         "truncated": response.truncated,
         "tables": tables,
         "metrics": {
-            item.name: item.model_dump(
-                mode="json", include={"description", "alias", "relevant_columns"}
-            )
+            item.name: {
+                **item.model_dump(
+                    mode="json", include={"description", "alias", "relevant_columns"}
+                ),
+                **(
+                    {"standard_query": True}
+                    if supports_standard_query(item.name)
+                    else {}
+                ),
+            }
             for item in response.metrics
         },
         "query_experiences": [

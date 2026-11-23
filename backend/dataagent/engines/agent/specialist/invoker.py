@@ -15,7 +15,13 @@ from langgraph._internal._constants import CONFIG_KEY_SCRATCHPAD
 from langgraph.graph.state import CompiledStateGraph
 
 from dataagent.engines.agent.common.shell_jobs import ShellJobRuntime
-from dataagent.engines.agent.specialist.outcome import task_outputs
+from dataagent.engines.agent.specialist.outcome import (
+    primary_query_issue,
+    primary_query_result,
+    published_time_issue,
+    semantic_receipts,
+    task_outputs,
+)
 from dataagent.engines.assistant.contracts import (
     DELEGATION_CONTEXT_KEY,
     DelegationCheckpointRecord,
@@ -35,6 +41,7 @@ from dataagent.engines.assistant.events import (
 from dataagent.engines.assistant.execution.activity import SessionActivity
 from dataagent.engines.assistant.messages.stream import MessageDeltaParser
 from dataagent.engines.assistant.models.session import AgentSessionKey
+from dataagent.engines.agent.specialist.delivery_clock import delivery_clock
 from dataagent.engines.assistant.repositories.budget import BudgetExceeded
 from dataagent.engines.assistant.repositories.session import SessionCheckpointRepository
 from dataagent.engines.assistant.sessions.checkpoint_view import (
@@ -146,8 +153,10 @@ class DelegationExecutor:
         config = self.build_subagent_config(parent_config, session_key)
         if config.get("callbacks"):
             config["metadata"] = {
-                **(config.get("metadata") or {}), "agent_type": request.agent_type,
-                "session_id": request.session_id, "delegation_id": delegation_id,
+                **(config.get("metadata") or {}),
+                "agent_type": request.agent_type,
+                "session_id": request.session_id,
+                "delegation_id": delegation_id,
             }
         try:
             async with (
@@ -191,14 +200,15 @@ class DelegationExecutor:
                             )
                         )
                     try:
-                        async with asyncio.timeout(seconds):
-                            result = await self._invoke_specialist(
-                                request,
-                                session_key,
-                                config,
-                                delegation_id,
-                                activity_writer,
-                            )
+                        with delivery_clock(seconds):
+                            async with asyncio.timeout(seconds):
+                                result = await self._invoke_specialist(
+                                    request,
+                                    session_key,
+                                    config,
+                                    delegation_id,
+                                    activity_writer,
+                                )
                     except TimeoutError as exc:
                         self._write_status_activity(
                             request, delegation_id, "failed", activity_writer
@@ -253,14 +263,16 @@ class DelegationExecutor:
             return self._failed_result(
                 request,
                 "专家智能体会话执行失败",
-                f"{type(exc).__name__}: {exc}",
+                exc,
+                delegation_id,
             )
 
     @staticmethod
     def _failed_result(
         request: DelegationRequest,
         content: str,
-        reason: str,
+        exc: Exception,
+        delegation_id: str,
     ) -> DelegationResult:
         """构造符合协议的失败结果。"""
         return DelegationResult(
@@ -268,7 +280,11 @@ class DelegationExecutor:
             analysis_id=request.analysis_id,
             agent_type=request.agent_type,
             session_id=request.session_id,
-            content=f"{content}：{reason}",
+            delegation_id=delegation_id,
+            failure_code="specialist_type_error"
+            if request.agent_type in {"analyst", "reviewer"} and isinstance(exc, TypeError)
+            else None,
+            content=f"{content}：{type(exc).__name__}: {exc}",
         )
 
     def _build_session_key(
@@ -313,9 +329,18 @@ class DelegationExecutor:
                             + (
                                 "\n任务验收与固定输入 "
                                 + request.model_dump_json(
-                                    include={"inputs", "acceptance"}
+                                    include={
+                                        "inputs",
+                                        "acceptance",
+                                        "calendar_window",
+                                        "sum_required",
+                                    },
+                                    exclude_none=True,
                                 )
-                                if request.inputs or request.acceptance
+                                if request.inputs
+                                or request.acceptance
+                                or request.calendar_window
+                                or request.sum_required
                                 else ""
                             ),
                             additional_kwargs={
@@ -342,6 +367,31 @@ class DelegationExecutor:
             outcome, outputs, query_outputs = task_outputs(
                 activity.messages if activity else []
             )
+            primary_sql = None
+            primary_values = {}
+            if (
+                request.agent_type == "explorer"
+                and outcome
+                and outcome.verdict == "passed"
+            ):
+                if activity and outcome.evidence:
+                    primary_sql, primary_values = primary_query_result(
+                        activity.messages, outcome.evidence[0]
+                    )
+                if (request.calendar_window or request.sum_required) and (
+                    issue := primary_query_issue(
+                        primary_sql, request.calendar_window, request.sum_required
+                    )
+                    or published_time_issue(
+                        activity.messages,
+                        outcome.metric,
+                        primary_sql,
+                        request.calendar_window,
+                    )
+                ):
+                    outcome = outcome.model_copy(
+                        update={"verdict": "needs_revision", "repair_target": issue}
+                    )
             if outcome is None:
                 outcome = TaskOutcome(
                     verdict="blocked",
@@ -353,6 +403,11 @@ class DelegationExecutor:
                 outcome=outcome,
                 outputs=outputs,
                 query_outputs=query_outputs,
+                primary_sql=primary_sql,
+                primary_values=primary_values,
+                semantic_receipts=semantic_receipts(activity.messages)
+                if activity and request.agent_type == "explorer"
+                else [],
                 status="completed",
                 analysis_id=request.analysis_id,
                 agent_type=request.agent_type,
@@ -373,7 +428,7 @@ class DelegationExecutor:
         except Exception as exc:
             if agent_run is not None:
                 failure = self._failed_result(
-                    request, "专家智能体会话执行失败", f"{type(exc).__name__}: {exc}"
+                    request, "专家智能体会话执行失败", exc, delegation_id
                 )
                 await self._save_delegation_record(
                     agent_run.agent, config, delegation_id, "failed", request, failure

@@ -259,6 +259,12 @@ def test_exhausted_delegations_end_turn_without_another_model_call():
         name="delegation", tool_call_id="two", content='{"status":"completed"}'
     )
     assert _budget_stop([failed, other]) is None
+    crashed = failed.model_copy(
+        update={
+            "content": '{"failure_code":"specialist_type_error","analysis_id":"orders","content":"TypeError"}'
+        }
+    )
+    assert "TypeError" in _budget_stop([crashed]).result[0].content
 
 
 def test_submitted_html_handoff_requires_matching_evidence_in_current_task():
@@ -290,6 +296,19 @@ def test_submitted_html_handoff_requires_matching_evidence_in_current_task():
     result = _submitted_report([start, frozen, passed])
     assert "/data/v2.html" in result.result[0].content
     assert "金额核对" in result.result[0].content
+    assert _submitted_report([start, frozen, passed], "reviewer") is None
+    signed = passed.model_copy(
+        update={
+            "content": json.dumps(
+                {
+                    "verdict": "passed",
+                    "checks": {"金额核对": "一致"},
+                    "evidence": ["/data/input.png", "/data/v2.html"],
+                }
+            )
+        }
+    )
+    assert _submitted_report([start, frozen, signed], "reviewer")
     assert _submitted_report([start, frozen, start, passed]) is None
     assert _submitted_report([start, frozen, submit("passed", "/data/v1.html")]) is None
     assert (

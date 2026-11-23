@@ -181,19 +181,21 @@ async def downloads(client, path, cid):
         (r["data"] for r in reversed(journal(path)) if r["kind"] == "history"), []
     )
     receipts = {}
-    attachments = {
-        a["f_path"]
-        for m in latest
-        for a in m.get("attachments") or []
-        if a.get("delivery_status") == "verified"
-    }
+    attachments = set()
+    turn = 0
     for message in latest:
+        if message.get("role") == "user":
+            turn += 1
+        attachments.update(
+            (turn, a["f_path"]) for a in message.get("attachments") or []
+            if a.get("delivery_status") == "verified"
+        )
         for p in message["parts"]:
             if p["type"] == "tool_result" and p.get("name") == "publish_artifact":
                 value = json.loads(p["content"])
                 if value.get("status") == "verified":
-                    receipts[value["receipt_id"]] = value
-    for rid, receipt in receipts.items():
+                    receipts[value["receipt_id"]] = (turn, value)
+    for rid, (turn, receipt) in receipts.items():
         remote = receipt["f_path"]
         try:
             resp = await client.get(
@@ -214,7 +216,8 @@ async def downloads(client, path, cid):
                 file=filename,
                 expected=expected,
                 sha256=observed,
-                attached=remote in attachments,
+                turn=turn,
+                attached=(turn, remote) in attachments,
                 verified=matched,
             )
         except httpx.HTTPError as exc:
@@ -232,9 +235,21 @@ async def downloads(client, path, cid):
 
 
 async def batch(
-    folder, url, cases, credentials, seconds, group, jobs=1, catalog_mode=False
+    folder,
+    url,
+    cases,
+    credentials,
+    seconds,
+    group,
+    jobs=1,
+    catalog_mode=False,
+    blind=False,
+    first_pass=False,
 ):
     cards = load_cards()
+    if blind:
+        cards = read(folder / "blind_cards.json")
+        cases = cases or list(cards)
     if catalog_mode:
         from .catalog import catalog
 
@@ -262,13 +277,31 @@ async def batch(
             (HERE / "pilot_cases.json").read_bytes()
         ).hexdigest(),
     }
+    if first_pass:
+        plan["stage"] = "first_pass"
     if jobs > 1:
         plan["parallel_trials"] = jobs
+    if blind:
+        plan["blind_cards"] = hashlib.sha256(
+            (folder / "blind_cards.json").read_bytes()
+        ).hexdigest()
+        plan["cards"] = plan["questions"] = plan["blind_cards"]
     if catalog_mode:
         plan["rubric_cases"] = True
         plan["question_texts"] = {
             k: [t["message"] for t in cards[k]["turns"]] for k in cases
         }
+    if (folder / "fixed_plan.json").exists():
+        from .fixed_regression import scoring_hashes
+
+        frozen = read(folder / "fixed_plan.json")
+        hashes = scoring_hashes()
+        if (not catalog_mode or not first_pass or group != "first"
+                or cases != list(frozen["cards"])
+                or (seconds, jobs) != (frozen["seconds"], frozen["jobs"])
+                or hashes != frozen["scoring_sha256"]):
+            raise ValueError("执行参数或代码与冻结计划不符")
+        plan["fixed_scoring"] = hashes
     with FileLock(str(output / "batch.lock"), timeout=0):
         if manifest.exists() and read(manifest) != plan:
             raise ValueError("此批已有不同的运行计划")
@@ -338,12 +371,20 @@ if __name__ == "__main__":
     p.add_argument("--case", action="append")
     p.add_argument("--seconds", type=int, default=1950)
     p.add_argument("--jobs", type=int, default=1)
+    p.add_argument("--first-pass", action="store_true", help="按原题验收，关闭反例回放")
     p.add_argument(
         "--catalog",
         action="store_true",
         help="从170道快照题中按 --case 选题，扩展题按业务口径复核",
     )
+    p.add_argument(
+        "--blind",
+        action="store_true",
+        help="使用本实验预登记的 blind_cards.json，聊天只发送 message",
+    )
     args = p.parse_args()
+    if args.blind and args.catalog:
+        p.error("--blind 与 --catalog 只能选一个")
     env = dotenv_values(args.env_file)
     creds = {"identifier": env["ADMIN_USERNAME"], "password": env["ADMIN_PASSWORD"]}
     if args.catalog and not args.case:
@@ -352,11 +393,13 @@ if __name__ == "__main__":
         batch(
             args.folder.resolve(),
             args.url,
-            args.case or list(load_cards()),
+            args.case or ([] if args.blind else list(load_cards())),
             creds,
             args.seconds,
             args.group,
             args.jobs,
             args.catalog,
+            args.blind,
+            args.first_pass,
         )
     )

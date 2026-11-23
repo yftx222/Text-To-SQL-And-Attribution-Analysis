@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 from deepagents.backends.protocol import FileDownloadResponse
-from langchain_core.messages import AnyMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from dataagent.engines.agent.common.middleware import message_context as context
 
@@ -53,6 +53,12 @@ def test_images_without_message_ids_reuse_parsing_and_downloads():
         assert image["type"] == "image"
         assert image["base64"] == "aW1hZ2U="
     assert [message.model_dump() for message in messages] == original
+    _, next_images = context._file_references(
+        [first, AIMessage(content="已看过，检查第二张"), second],
+        "/data/conversation",
+        "/data/conversation/session",
+    )
+    assert set(next_images) == {2}
 
 
 def test_persisted_attachments_are_checked_again_before_loading():

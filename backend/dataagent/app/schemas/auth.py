@@ -14,8 +14,9 @@ class LoginRequest(BaseModel):
     """用户登录请求。"""
 
     model_config = ConfigDict(extra="forbid")
-
+    #用户名或邮箱
     identifier: str = Field(min_length=1)
+    #密码
     password: SecretStr
 
 

@@ -14,11 +14,67 @@ def rate(passed, denominator):
     }
 
 
-def hits(groups, keys):
+def matched(groups, keys):
     seen = {".".join(key) if isinstance(key, (tuple, list)) else key for key in keys}
-    return rate(
-        sum(any(key in seen for key in choices) for choices in groups), len(groups)
-    )
+    return {
+        i for i, choices in enumerate(groups) if any(key in seen for key in choices)
+    }
+
+
+def hits(groups, keys):
+    return rate(len(matched(groups, keys)), len(groups))
+
+
+def sql_context_coverage(tools, gold):
+    """Replay visible metadata in the same specialist turn up to each SQL call."""
+    events = []
+    for t in tools:
+        if t["name"] == "execute_sql" and t.get("call_line"):
+            events.append((t["call_line"], 0, t))
+        if t["name"] == "recall_context" and t.get("result_line"):
+            events.append((t["result_line"], 1, t))
+    contexts, result = {}, {}
+    for _, is_result, t in sorted(events, key=lambda e: e[:2]):
+        scope = (t["turn"], t.get("delegation"))
+        if not scope[1]:
+            continue
+        if not is_result:
+            known = [v for (s, _), v in contexts.items() if s == scope]
+            if known and all(v is not None for v in known):
+                result[t["call"]] = {
+                    typ: hits(groups, set().union(*(v[typ] for v in known)))
+                    for typ, groups in gold.items()
+                }
+            continue
+        payload = t.get("result")
+        if not isinstance(payload, dict) or payload.get("mode") not in (
+            "full",
+            "delta",
+        ):
+            continue
+        key = (scope, payload.get("query"))
+        if payload["mode"] == "full":
+            contexts[key] = {"column": set(), "metric": set()}
+        state = contexts.setdefault(key, None)
+        if state is None:
+            continue
+        for table, info in payload.get("tables", {}).items():
+            state["column"].update(table + "." + c for c in info.get("columns", {}))
+        state["metric"].update(payload.get("metrics", {}))
+        removed = payload.get("removed", {})
+        state["metric"].difference_update(removed.get("metrics", []))
+        for table, info in removed.get("tables", {}).items():
+            if not info:
+                state["column"] = {
+                    c for c in state["column"] if not c.startswith(table + ".")
+                }
+            else:
+                state["column"].difference_update(
+                    table + "." + c
+                    for c, change in info.get("columns", {}).items()
+                    if not change
+                )
+    return result
 
 
 def recall_metrics(case, traces, k=5, *, tools=(), snapshots=()):
@@ -49,11 +105,14 @@ def recall_metrics(case, traces, k=5, *, tools=(), snapshots=()):
     result = {}
     for typ, groups in gold.items():
         channels = {}
+        term_hits = {}
         for ch in ("fulltext", "vector"):
             searched = [
                 r
                 for r in traces[:first]
                 if r["event"] == "recall_channel"
+                and r.get("recall_id") == context.get("recall_id")
+                and r.get("trace") == context.get("trace")
                 and r["resource_type"] == typ
                 and r["channel"] == ch
             ]
@@ -62,6 +121,11 @@ def recall_metrics(case, traces, k=5, *, tools=(), snapshots=()):
                 for f in context["failures"]
                 if f["resource_type"] == typ and f["channel"] == ch
             ]
+            term_hits[ch] = {
+                r["term"]: matched(groups, r["keys"][:k])
+                for r in searched
+                if not any(f.get("term") in (None, r["term"]) for f in failed)
+            }
             channels[ch] = {
                 "terms": [
                     {
@@ -96,6 +160,11 @@ def recall_metrics(case, traces, k=5, *, tools=(), snapshots=()):
             )
             visible = hits(groups, model_keys)
         result[typ] = {
+            "vector_only_gold_groups": {
+                term: len(found - term_hits["fulltext"][term])
+                for term, found in term_hits["vector"].items()
+                if term in term_hits["fulltext"]
+            },
             "channels": channels,
             "first_context_coverage": hits(groups, keys),
             "k_per_term": k,
@@ -127,8 +196,16 @@ def summarize(trials, scores):
     numeric = {r["assertion"] for r in scores if type(r["expected"]) in (str, int)}
     seconds = sorted(t["seconds"] for t in started if t["closed"])
     sql_total = sum(sum(t["sql"].values()) for t in started)
+    verified = [
+        verdict([t["first_correct_delivery"], t.get("counterexample_status", "review")])
+        for t in started
+    ]
     return {
         "started": len(started),
+        "verified_delivery": {
+            **rate(verified.count("pass"), len(started)),
+            "review": verified.count("review"),
+        },
         "adjudicated": sum(t["business"] != "review" for t in started),
         "business": rate(sum(t["business"] == "pass" for t in started), len(started)),
         "first_correct_delivery": rate(

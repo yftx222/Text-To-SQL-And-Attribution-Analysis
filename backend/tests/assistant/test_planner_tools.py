@@ -1,13 +1,16 @@
 """Planner 专用工具测试。"""
 
+import json
 import unittest
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 from langchain.tools import ToolRuntime
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
 from dataagent.engines.agent.planner.tools.delegation import create_delegation_tools
+from dataagent.engines.agent.planner.tools.query_answer import deliver_query_values
 
 
 def make_runtime() -> ToolRuntime:
@@ -19,6 +22,74 @@ def make_runtime() -> ToolRuntime:
         stream_writer=lambda _: None,
         tool_call_id="delegation-call",
         store=None,
+    )
+
+
+def test_query_value_delivery_requires_a_current_passed_receipt_and_real_column():
+    runtime = make_runtime()
+    messages = runtime.state["messages"] = [HumanMessage(content="金额合计？")]
+    data = {
+        "status": "completed",
+        "agent_type": "explorer",
+        "outcome": {"verdict": "passed"},
+        "primary_values": {"total": "0.00"},
+    }
+    messages.append(
+        ToolMessage(
+            content=json.dumps(data), name="delegation", tool_call_id="observed"
+        )
+    )
+    args = {
+        "runtime": runtime,
+        "delegation_id": "observed",
+        "columns": [{"column": "total", "label": "合计", "unit": "元"}],
+    }
+    assert deliver_query_values.invoke(args) == {
+        "status": "delivered",
+        "answer": "合计：0.00元",
+    }
+    limited = deliver_query_values.invoke({**args, "missing_inputs": ["逐行分摊金额"]})
+    assert (
+        limited["answer"]
+        == "合计：0.00元\n仅凭题中给出的汇总指标，无法推算所问结果。还需要逐行分摊金额。"
+    )
+    assert (
+        deliver_query_values.invoke(
+            {**args, "columns": [{"column": "invented", "label": "其他"}]}
+        )["status"]
+        == "needs_revision"
+    )
+    data["outcome"]["verdict"] = "needs_revision"
+    messages[-1] = ToolMessage(
+        content=json.dumps(data), name="delegation", tool_call_id="observed"
+    )
+    assert deliver_query_values.invoke(args)["status"] == "needs_revision"
+    data["outcome"]["verdict"] = "passed"
+    messages[-1] = ToolMessage(
+        content=json.dumps(data), name="delegation", tool_call_id="observed"
+    )
+    messages.append(HumanMessage(content="换一个月份"))
+    assert deliver_query_values.invoke(args)["status"] == "needs_revision"
+
+
+def test_planner_ends_with_only_the_verified_numeric_receipt():
+    from dataagent.engines.agent.common.middleware.message_context import (
+        MessageContextMiddleware,
+    )
+
+    middleware = MagicMock(_agent_name="planner")
+    name = "deliver_query_values"
+    call = AIMessage(content="", tool_calls=[{"name": name, "id": "pick", "args": {}}])
+    receipt = ToolMessage(
+        name=name,
+        tool_call_id="pick",
+        content=json.dumps({"status": "delivered", "answer": "合计：0.00元"}),
+    )
+    response = MessageContextMiddleware._terminal_response(middleware, [call, receipt])
+    assert response.result[0].content == "合计：0.00元"
+    receipt.content = '{"status": "needs_revision"}'
+    assert (
+        MessageContextMiddleware._terminal_response(middleware, [call, receipt]) is None
     )
 
 

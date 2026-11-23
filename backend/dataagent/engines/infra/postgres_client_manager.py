@@ -1,5 +1,7 @@
 """PostgreSQL 引擎、会话工厂与建表操作。"""
 
+import os
+
 from sqlalchemy import URL, MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -11,6 +13,15 @@ class PostgresClientManager:
 
     def __init__(self, db_config: DBConfig) -> None:
         """创建连接池和会话工厂；连接按需建立。"""
+        pool_options = {}
+        if os.getenv("AIOPS_HTTP_METRICS_TOKEN"):
+            try:
+                from agent.adapters.pool_metrics import ObservedAsyncPool
+            except ModuleNotFoundError as exc:
+                if exc.name not in {"agent", "agent.adapters", "agent.adapters.pool_metrics"}:
+                    raise
+            else:
+                pool_options["poolclass"] = ObservedAsyncPool
         self.engine = create_async_engine(
             URL.create(
                 drivername="postgresql+psycopg",
@@ -26,6 +37,7 @@ class PostgresClientManager:
             pool_pre_ping=True,
             pool_recycle=1800,
             pool_timeout=30,
+            **pool_options,
         )
         self.session = async_sessionmaker(
             self.engine,

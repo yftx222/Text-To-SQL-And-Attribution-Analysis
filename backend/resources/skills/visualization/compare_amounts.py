@@ -19,7 +19,7 @@ def plot(args, changes):
         {"font.family": "WenQuanYi Zen Hei", "axes.unicode_minus": False}
     )
     fig, ax = plt.subplots(figsize=(8, max(2.8, len(changes) * 0.38)))
-    ax.barh(
+    bars = ax.barh(
         range(len(changes)),
         [float(x) for _, x in changes],
         color=["#ad4937" if x < 0 else "#296d72" for _, x in changes],
@@ -27,17 +27,25 @@ def plot(args, changes):
     ax.set_yticks(range(len(changes)), labels=[k for k, _ in changes])
     ax.axvline(0, color="#6b7280", linewidth=0.8)
     ax.set_xlabel(f"{args.metric}变化（{args.unit}）")
+    ax.bar_label(bars, labels=[f"{x:+,.2f}" for _, x in changes], padding=3)
+    ax.margins(x=0.28)
+    ax.set_title(
+        f"{args.title}\n{args.after_label} 减 {args.before_label}\n"
+        f"合计变化 {sum(x for _, x in changes):+,.2f} {args.unit}"
+    )
     fig.tight_layout()
     chart = args.output.with_suffix(".png")
     fig.savefig(chart, dpi=140)
     plt.close(fig)
+    if getattr(args, "chart_only", False):
+        return ""
     source = base64.b64encode(chart.read_bytes()).decode("ascii")
     return (
         f'<img alt="各分组本期比上期的金额变化" src="data:image/png;base64,{source}">'
     )
 
 
-def compose(args, stream, make_chart):
+def grouped_changes(args, stream):
     reader = csv.DictReader(stream)
     if not {args.group, args.before, args.after}.issubset(reader.fieldnames or []):
         raise ValueError(f"请从实际 CSV 表头选择列：{reader.fieldnames}")
@@ -60,6 +68,11 @@ def compose(args, stream, make_chart):
     changes = sorted(
         ((k, b - a) for k, (a, b) in amounts.items()), key=lambda item: item[1]
     )
+    return amounts, total, changes
+
+
+def compose(args, stream, make_chart):
+    amounts, total, changes = grouped_changes(args, stream)
     chart = make_chart(changes) if make_chart else ""
 
     show_rate = not getattr(args, "amounts_only", False)
@@ -100,6 +113,10 @@ def compose(args, stream, make_chart):
 
 def render(args):
     with args.csv.open(encoding="utf-8-sig", newline="") as stream:
+        if getattr(args, "chart_only", False):
+            _, _, changes = grouped_changes(args, stream)
+            plot(args, changes)
+            return {"groups": len(changes)}
         html, summary = compose(
             args,
             stream,
@@ -117,6 +134,7 @@ if __name__ == "__main__":
         "--amounts-only", action="store_true", help="仅展示金额和绝对变化额"
     )
     parser.add_argument("--table-only", action="store_true", help="仅输出证据表和结论")
+    parser.add_argument("--chart-only", action="store_true", help="仅生成同名 PNG")
     parser.add_argument(
         "--summary-json", action="store_true", help="输出与证据表同源的总额和变化摘要"
     )

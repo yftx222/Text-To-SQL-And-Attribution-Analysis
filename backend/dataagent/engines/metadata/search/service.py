@@ -81,6 +81,7 @@ class _RecallContext:
     value_scores: dict[ValueKey, _CandidateScore] = field(default_factory=dict)
     failures: list[SemanticRecallFailure] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    observation_id: str | None = field(default_factory=lambda: str(uuid.uuid4()) if evaluation.observe else None)
 
     @property
     def search_limit(self) -> int:
@@ -160,7 +161,7 @@ class SemanticResourceService:
         await self._retrieve(context)
         response = self._build_response(context)
         if evaluation.observe is not None:
-            evaluation.emit("recall_context", terms=request.terms, types=request.resource_types,
+            evaluation.emit("recall_context", recall_id=context.observation_id, terms=request.terms, types=request.resource_types,
                             columns=[[item.t_name, item.name] for item in response.columns],
                             metrics=[item.name for item in response.metrics],
                             failures=[item.model_dump(mode="json") for item in response.failures])
@@ -357,7 +358,7 @@ class SemanticResourceService:
                     ),
                 )
             if evaluation.observe is not None:
-                evaluation.emit("recall_channel", term=term, resource_type="value", channel="fulltext",
+                evaluation.emit("recall_channel", recall_id=context.observation_id, term=term, resource_type="value", channel="fulltext",
                                 keys=list(dict.fromkeys((h.item.t_name, h.item.c_name, h.item.value) for h in result
                                     if (h.item.t_name, h.item.c_name) in allowed_columns and context.catalog.columns[h.item.t_name, h.item.c_name].index_values)))
 
@@ -395,7 +396,7 @@ class SemanticResourceService:
                 continue
             seen_keys: set[KeyT] = set()
             if evaluation.observe is not None:
-                evaluation.emit("recall_channel", term=term, resource_type=resource_type, channel=match_type,
+                evaluation.emit("recall_channel", recall_id=context.observation_id, term=term, resource_type=resource_type, channel=match_type,
                                 keys=list(dict.fromkeys(k for h in result if (k := key_of(h.item)) in allowed_keys)))
             for rank, hit in enumerate(result, start=1):
                 key = key_of(hit.item)

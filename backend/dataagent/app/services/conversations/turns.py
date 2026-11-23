@@ -93,11 +93,12 @@ class ConversationTurnService:
                         "提交会话标题任务失败，等待定时补偿: "
                         f"conversation_id={target_id}"
                     )
-
+        #start作用：为当前会话启动一轮后台问答，并把接收执行进度和回答的事件流返回给 API。
         return await self._runs.start(
             user_id,
             conversation_id,
             message,
+            #真正执行prepare函数
             prepare=prepare,
         )
 

@@ -57,14 +57,36 @@ class TraceWriter(BaseCallbackHandler):
         )
 
     def on_chain_start(
-        self, serialized, inputs, *, run_id, parent_run_id=None, name=None, **kwargs
+        self,
+        serialized,
+        inputs,
+        *,
+        run_id,
+        parent_run_id=None,
+        name=None,
+        metadata=None,
+        **kwargs,
     ):
-        self.write("chain", run=run_id, parent=parent_run_id, name=name)
+        meta = metadata or {}
+        self.write(
+            "chain",
+            run=run_id,
+            parent=parent_run_id,
+            name=name,
+            step=meta.get("langgraph_step"),
+            node=meta.get("langgraph_node"),
+        )
 
     def on_llm_end(self, response, *, run_id, **kwargs):
         message = response.generations[0][0].message
         usage = getattr(message, "usage_metadata", None)
         self.write("model_end", run=run_id, usage=usage)
+
+    def on_chain_end(self, outputs, *, run_id, **kwargs):
+        self.write("chain_end", run=run_id)
+
+    def on_chain_error(self, error, *, run_id, **kwargs):
+        self.write("chain_error", run=run_id)
 
     def on_llm_error(self, error, *, run_id, **kwargs):
         self.write("model_error", run=run_id, error=type(error).__name__)

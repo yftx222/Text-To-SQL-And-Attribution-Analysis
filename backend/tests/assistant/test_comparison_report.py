@@ -1,10 +1,62 @@
 from argparse import Namespace
 from pathlib import Path
 from runpy import run_path
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock
+from uuid import uuid4
 
 import pytest
 
-from dataagent.engines.agent.specialist.comparison import compare_evidence
+from dataagent.engines.agent.specialist.comparison import (
+    comparison_tool,
+    compare_evidence,
+)
+
+
+def test_png_review_recomputes_signed_changes_without_approving_image():
+    cid = uuid4()
+    source, target = [
+        f"/data/.evidence-{cid}/{uuid4()}_{'a' * 64}.{ext}" for ext in ("csv", "png")
+    ]
+    runtime = SimpleNamespace(
+        state={
+            "current_delegation_id": "r",
+            "delegation_records": {
+                "r": {
+                    "task": {
+                        "inputs": [
+                            {"path": target, "agent_type": "analyst"},
+                            {"path": source, "agent_type": "explorer"},
+                        ]
+                    }
+                }
+            },
+        },
+        config={"configurable": {"conversation_id": str(cid)}},
+    )
+    backend = Mock(workspace_dir="/data/reviewer")
+    csv = SimpleNamespace(error=None, content=b"k,b,a\nx,2,1\ny,1,4\nall,3,5\n")
+    backend.download_files.return_value = [
+        csv,
+        SimpleNamespace(error=None, content=b"\x89PNG\r\n\x1a\n"),
+    ]
+    backend.upload_files.return_value = [SimpleNamespace(error=None)]
+    backend.freeze_file.return_value = "/data/fixed.json"
+    check = comparison_tool("reviewer", backend).func
+    result = check(runtime, group="k", before="b", after="a", total_label="all")
+    assert result["visual_check_required"] and result["changes"] == {
+        "x": "-1",
+        "y": "3",
+    }
+    assert result["total_change"] == "2" and result["path"] == "/data/fixed.json"
+    proof = json.loads(backend.upload_files.call_args.args[0][0][1])
+    assert proof["report"] == target and proof["source"] == source
+    csv.content = csv.content.replace(b"all,3,5", b"all,3,9")
+    assert (
+        check(runtime, group="k", before="b", after="a", total_label="all")["status"]
+        == "error"
+    )
 
 
 def test_generated_report_and_independent_check(tmp_path):

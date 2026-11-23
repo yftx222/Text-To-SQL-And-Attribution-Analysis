@@ -109,6 +109,11 @@ def compare_evidence(csv_bytes, html_bytes):
         raise TypeError("旧版或自定义报告没有标准列映射，请按原始 CSV 单独复核")
     group, before, after = (page.columns[k] for k in ("group", "before", "after"))
     total_label = page.columns.get("total_label")
+    expected, totals = _source_amounts(csv_bytes, group, before, after, total_label)
+    return _compare_rows(page, expected, totals)
+
+
+def _source_amounts(csv_bytes, group, before, after, total_label):
     reader = csv.DictReader(io.StringIO(csv_bytes.decode("utf-8-sig"), newline=""))
     if (
         not {group, before, after}.issubset(reader.fieldnames or [])
@@ -122,11 +127,17 @@ def compare_evidence(csv_bytes, html_bytes):
             raise ValueError("源表分组为空或重复")
         expected[key] = (Decimal(row[before]), Decimal(row[after]))
     stated = expected.pop(total_label) if total_label is not None else None
-    if not expected:
-        raise ValueError("源表缺少分组")
+    if not expected or any(
+        not n.is_finite() for pair in expected.values() for n in pair
+    ):
+        raise ValueError("源表缺少分组或金额无效")
     totals = tuple(sum(pair[i] for pair in expected.values()) for i in (0, 1))
     if stated is not None and stated != totals:
         raise ValueError("源表合计与分组合计不符")
+    return expected, totals
+
+
+def _compare_rows(page, expected, totals):
     if (
         page.tables != 1
         or len(page.rows) != len(expected) + 2
@@ -204,14 +215,12 @@ def comparison_tool(role, backend):
         total_label: str | None = None,
         include_chart: bool = False,
         include_rate: bool = False,
+        chart_only: bool = False,
     ) -> dict:
-        """直接从 inputs[csv_index] 的原始汇总 CSV 生成并固定最终 HTML。group/before/after 是表头；total_label 是已有合计行的分组值。"""
+        """从两期原始汇总 CSV 生成固定 HTML；只要各组金额变化图时设 chart_only=True，直接返回固定 PNG。group/before/after 对应实际表头。"""
         try:
             source = _input(runtime, csv_index, "explorer", ".csv")
             path = f"{backend.workspace_dir}/{uuid4()}.html"
-            (src,) = backend.download_files([source])
-            if src.error:
-                return tool_error("简报来源读取失败", src.error)
             args = Namespace(
                 csv=PurePosixPath(source),
                 group=group,
@@ -227,13 +236,15 @@ def comparison_tool(role, backend):
                 amounts_only=not include_rate,
             )
             chart = ""
-            if include_chart:
+            if include_chart or chart_only:
                 # Matplotlib 和中文字体只安装在分析沙箱里。
                 cmd = [
                     "python",
                     "/skills/analyst/visualization/compare_amounts.py",
                     f"--output={path}",
                 ]
+                if chart_only:
+                    cmd.append("--chart-only")
                 for key in (
                     "csv",
                     "group",
@@ -253,6 +264,14 @@ def comparison_tool(role, backend):
                 chart_result = backend.execute(shlex.join(cmd))
                 if chart_result.exit_code != 0:
                     return tool_error("图表生成失败", chart_result.output[-1000:])
+                if chart_only:
+                    return {
+                        "status": "success",
+                        "source": source,
+                        "path": backend.freeze_file(
+                            path.removesuffix(".html") + ".png"
+                        ),
+                    }
                 (png,) = backend.download_files([path.removesuffix(".html") + ".png"])
                 if png.error:
                     return tool_error("图表读取失败", png.error)
@@ -261,6 +280,9 @@ def comparison_tool(role, backend):
                     + base64.b64encode(png.content).decode("ascii")
                     + '">'
                 )
+            (src,) = backend.download_files([source])
+            if src.error:
+                return tool_error("简报来源读取失败", src.error)
             html, summary = compose(
                 args,
                 io.StringIO(src.content.decode("utf-8-sig"), newline=""),
@@ -285,15 +307,33 @@ def comparison_tool(role, backend):
     def verify_amount_comparison(
         runtime: ToolRuntime,
         csv_index: int = 1,
+        group: str = "",
+        before: str = "",
+        after: str = "",
+        total_label: str | None = None,
     ) -> dict:
-        """对 inputs[0] 的标准 HTML，从 inputs[csv_index] 原始 CSV 独立复算并固定差异核对明细。返回真实取数列和展示标签，供核验口径与日期方向。"""
+        """核验标准 HTML；对 PNG 传入源 CSV 的分组、前期、本期列与已有合计行标签，独立复算后须目视核对实际图片。"""
         try:
             source = _input(runtime, csv_index, "explorer", ".csv")
-            report = _input(runtime, 0, "analyst", ".html")
+            report = _input(runtime, 0, "analyst", (".html", ".png"))
             src, doc = backend.download_files([source, report])
             if src.error or doc.error:
                 return tool_error("无法读取本轮固定输入", src.error or doc.error)
-            checks = compare_evidence(src.content, doc.content)
+            png = report.lower().endswith(".png")
+            if png:
+                if not doc.content.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise ValueError("被审文件缺少 PNG 签名")
+                amounts, totals = _source_amounts(
+                    src.content, group, before, after, total_label
+                )
+                checks = {
+                    "source_columns": [group, before, after],
+                    "changes": {k: str(b - a) for k, (a, b) in amounts.items()},
+                    "totals": [str(x) for x in totals],
+                    "total_change": str(totals[1] - totals[0]),
+                }
+            else:
+                checks = compare_evidence(src.content, doc.content)
             path = f"{backend.workspace_dir}/{uuid4()}.json"
             proof = {
                 "source": source,
@@ -305,6 +345,14 @@ def comparison_tool(role, backend):
             )
             if saved.error:
                 return tool_error("复核证据写入失败", saved.error)
+            if png:
+                return {
+                    "status": "success",
+                    "path": backend.freeze_file(path),
+                    "target": report,
+                    "visual_check_required": True,
+                    **checks,
+                }
             return {
                 "status": "success",
                 "path": backend.freeze_file(path),

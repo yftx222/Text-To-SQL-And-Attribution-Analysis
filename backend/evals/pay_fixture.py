@@ -22,7 +22,8 @@ def payment_counts(
     with closing(sqlite3.connect(":memory:")) as db:
         db.executescript("""
             CREATE TABLE dwd_trade_pay_detail_di
-                (pay_detail_id INTEGER PRIMARY KEY, biz_date TEXT, pay_request_time TEXT);
+                (pay_detail_id INTEGER PRIMARY KEY, biz_date TEXT, pay_request_time TEXT,
+                 requested_pay_amount NUMERIC DEFAULT 10);
             CREATE TABLE dwd_trade_pay_status_event_di
                 (pay_detail_id INTEGER, after_pay_status TEXT, event_seq_no INTEGER,
                  event_time TEXT, biz_date TEXT);
@@ -31,7 +32,7 @@ def payment_counts(
         successes = 1 if crossing else 191
         for i in range(1, count + 1):
             db.execute(
-                "INSERT INTO dwd_trade_pay_detail_di VALUES (?, '2026-09-30', '2026-09-30 20:00')",
+                "INSERT INTO dwd_trade_pay_detail_di(pay_detail_id, biz_date, pay_request_time) VALUES (?, '2026-09-30', '2026-09-30 20:00')",
                 (i,),
             )
             state = "SUCCESS" if i <= successes else "FAILED"

@@ -23,7 +23,7 @@ def ontology_tools(service, key, role):
     async def execute_semantic_query(
         request: SemanticMonthRequest | SemanticQueryRequest,
     ):
-        """按已发布的售后规则查询两次独立同类故障及受影响客户。自然月用 month=YYYY-MM。自定义时间窗带时区，右端不包含。"""
+        """查询修复后30天内发生的同类复发。month 限定后事件发生月份；指定客户、设备分别填 customer_ids、device_ids。"""
         try:
             return {
                 "status": "success",

@@ -10,13 +10,14 @@ from pydantic import ConfigDict, Field
 
 from dataagent.engines.agent.common.tools.errors import tool_error
 from dataagent.engines.agent.planner.tools.delivery import DeliveryGate
+from dataagent.engines.agent.planner.tools.query_answer import deliver_query_values
 from dataagent.engines.agent.specialist.invoker import DelegationExecutor
 from dataagent.engines.assistant.contracts import (
     DelegationRequest,
     DeleteSessionRequest,
     ListSessionsRequest,
 )
-from dataagent.engines.assistant.contracts.sessions import TaskInput
+from dataagent.engines.assistant.contracts.sessions import CalendarWindow, TaskInput
 from dataagent.engines.assistant.sessions.management import AgentSessionService
 from dataagent.engines.contract.analysis import AgentType
 
@@ -50,6 +51,8 @@ def create_delegation_tools(
         inputs: list[TaskInput] | None = None,
         acceptance: list[str] | None = None,
         report_delivery: bool = False,
+        calendar_window: CalendarWindow | None = None,
+        sum_required: bool = False,
     ) -> dict[str, object]:
         """创建或恢复专业 Agent Session，返回执行状态、Session 身份和原始文本回答。"""
         request = DelegationRequest.model_construct(
@@ -59,6 +62,8 @@ def create_delegation_tools(
             message=message,
             inputs=inputs or [],
             acceptance=acceptance or [],
+            calendar_window=calendar_window,
+            sum_required=sum_required,
         )
         delegation_id = runtime.tool_call_id
         if delegation_id is None:
@@ -160,7 +165,7 @@ def create_delegation_tools(
             return tool_error("Session 删除失败", exc, code="delete_session_failed")
         return result.model_dump(mode="json")
 
-    return [delegation, list_sessions, delete_session]
+    return [delegation, list_sessions, delete_session, deliver_query_values]
 
 
 class _DelegationToolRequest(DelegationRequest):

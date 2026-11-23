@@ -112,6 +112,24 @@ async def run_isolated(user_id):
         result = await service.execute(key, request)
         assert result["result"]["customers"] == ["C04", "C07", "C10"]
         assert result["result"]["summary"]["events"] == 6
+        assert result["manifest"]["window_basis"] == "recurrence_occurred_at"
+        # A visible customer with no matching device is distinct from an invisible customer.
+        for customers, devices, expected, unavailable in (
+            (("C07",), (), {"BAT-0019-B", "BAT-0055-B"}, []),
+            (("C01", "C07"), (), {"BAT-0019-B", "BAT-0055-B"}, ["C01"]),
+            (("C07",), ("BAT-0028",), set(), []),
+        ):
+            filtered = await service.execute(
+                key,
+                request.model_copy(
+                    update={"customer_ids": customers, "device_ids": devices}
+                ),
+            )
+            assert filtered["manifest"]["unavailable_customer_ids"] == unavailable
+            assert {pair[1] for pair in filtered["result"]["event_pairs"]} == expected
+            assert all(
+                row["customer_id"] == "C07" for row in filtered["result"]["evidence"]
+            )
         assert (
             result["manifest"]["request"]["window_end"] == "2026-11-01T00:00:00+08:00"
         )
@@ -120,6 +138,7 @@ async def run_isolated(user_id):
         denied = await service.execute(
             key, request.model_copy(update={"customer_ids": ("C01",)})
         )
+        assert denied["manifest"]["unavailable_customer_ids"] == ["C01"]
         assert (
             denied["result"]["summary"]["events"] == 0
             and denied["result"]["evidence"] == []

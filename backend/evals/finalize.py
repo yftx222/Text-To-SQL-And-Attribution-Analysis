@@ -8,6 +8,8 @@ from pathlib import Path
 from .live_report import jsonl, rows, save
 from .metrics import rate, summarize
 from .offline_score import read
+from .process_score import evaluate, macro
+from .trace_metrics import stability
 
 SNAPSHOT_KEYS = ("tables", "metadata", "es", "source", "config", "models", "limits")
 
@@ -45,16 +47,22 @@ def finalize(folder):
             raise ValueError(f"{g} 复跑题目与预登记不符")
         all_trials.extend({"group": g, **t} for t in trials)
         all_scores.extend({"group": g, **s} for s in scores)
+        if (root / "counterexamples.json").exists():
+            source_files.append(root / "counterexamples.json")
         source_files.extend(
             root / name
             for name in (
                 "manifest.json",
                 "scores.jsonl",
                 "trials.jsonl",
-                "reviews.json",
                 "audit.json",
                 "rankings.json",
             )
+        )
+        source_files.extend(
+            root / n
+            for n in ("reviews.json", "automatic_reviews.json")
+            if (root / n).exists()
         )
     if len({t["cid"] for t in all_trials}) != len(all_trials) or len(
         {t["trial"] for t in all_trials}
@@ -62,7 +70,20 @@ def finalize(folder):
         raise ValueError("部分尝试复用了会话或 trial_id")
     first = [t for t in all_trials if t["group"] == groups[0]]
     metrics = summarize(first, all_scores)
-    human = read(folder / groups[0] / "reviews.json")
+    process, _ = evaluate(folder, groups[0])
+    metrics["process_rates"] = process["rates"]
+    metrics["billing"] = process["billing"]
+    metrics["cost"] = process["billing"]["total"]
+    source_files.extend(
+        p
+        for p in (
+            folder / "prices.json",
+            folder / "process_rules.json",
+            folder / "counterexample_plan.json",
+            folder / groups[0] / "process_reviews.json",
+        )
+        if p.exists()
+    )
     by_type = {}
     for name, kind in (("查数", "other"), ("多轮", "CNV"), ("归因报告", "ATT")):
         selected = [
@@ -91,6 +112,7 @@ def finalize(folder):
                 sum(m["denominator"] for m in measured),
             )
             recall[key][field + "_measured_cases"] = len(measured)
+            recall[key][field + "_macro"] = macro([v[field] for v in values])
     sql = Counter()
     for t in first:
         sql.update(t["sql"])
@@ -139,6 +161,10 @@ def finalize(folder):
         "first": metrics,
         "by_type": by_type,
         "repeat_results": repeats,
+        "stability": stability(
+            design["repeat"],
+            [[t for t in all_trials if t["group"] == g] for g in groups],
+        ),
         "diagnostic_recall": recall,
         "first_sql_outcomes": dict(sql),
         "evidence_sha256": {
@@ -165,6 +191,7 @@ def finalize(folder):
         "|---|---:|---:|",
     ]
     for name, key in (
+        ("原题与独立反例均通过", "verified_delivery"),
         ("业务正确", "business"),
         ("首次正确交付", "first_correct_delivery"),
         ("数字及分组", "numeric"),
@@ -195,7 +222,13 @@ def finalize(folder):
         )
     lines += [
         "",
-        f"首轮已报告 {metrics['known_tokens']:,} Token，包含重复上下文。缺失用量单列；未绑定计费价格与缓存折扣，实际费用未知。耗时为每题用户回合耗时之和，P90 取最近秩。",
+        f"首轮已报告 {metrics['known_tokens']:,} Token。按配置单价核算的首轮成本为 "
+        + (
+            f"{metrics['cost']} {process['billing']['currency']}"
+            if metrics["cost"] is not None
+            else "N/A（计价或用量证据不足）"
+        )
+        + "。耗时为每题用户回合耗时之和，P90 取最近秩。",
         "",
         "## 高风险复跑",
         "",
@@ -206,18 +239,24 @@ def finalize(folder):
         lines.append("| " + " | ".join([key, *statuses]) + " |")
     lines += [
         "",
-        f"预登记题首次通过 {sum(v[0] == 'pass' for v in repeats.values())}/{len(repeats)}，三次均通过 {sum(all(s == 'pass' for s in v) for v in repeats.values())}/{len(repeats)}。复跑单独统计。",
+        f"三次均通过 {ratio(manifest['stability']['all_pass'])}，至少一次通过 {ratio(manifest['stability']['any_pass'])}。复跑单独统计。",
         "",
         "## 首次检索与最终收到的上下文",
         "",
-        "| 资源 | 标注题 | 首次融合前五项覆盖 | 首次完整工具结果覆盖 |",
+        "| 资源 | 有检索记录的标注题 | 融合前五项逐题平均（实测题数） | 完整工具结果逐题平均（实测题数） |",
         "|---|---:|---:|---:|",
     ]
     for name, k in (("字段", "column"), ("指标", "metric")):
         m = recall[k]
-        lines.append(
-            f"| {name} | {m['cases']} | {ratio(m['fused_top_k'])} | {ratio(m['model_visible'])} |"
-        )
+        cells = []
+        for key in ("fused_top_k_macro", "model_visible_macro"):
+            v = m[key]
+            cells.append(
+                f"{v['rate']:.1%}（{v['measured_cases']}）"
+                if v["rate"] is not None
+                else "N/A"
+            )
+        lines.append(f"| {name} | {m['cases']} | {' | '.join(cells)} |")
     lines += [
         "",
         "分母是人工标注的必需资源组数，每组允许等价字段。仅统计能与实际工具返回时间和查询对应的证据。逐词、逐通道排名见各题记录。",
@@ -227,8 +266,11 @@ def finalize(folder):
     ]
     for t in first:
         if t["business"] == "fail":
-            scope = human[t["case"]]["facts"]["sql_scope"]
-            reason = scope[1].partition(" ")[2] if not scope[0] else t["final"]
+            reason = "，".join(
+                s["assertion"] + " " + str(s.get("evidence") or "")
+                for s in all_scores
+                if s["trial_id"] == t["trial"] and s["status"] == "fail"
+            )
             lines.append(f"- {t['case']}　{reason}")
     lines += [
         "",

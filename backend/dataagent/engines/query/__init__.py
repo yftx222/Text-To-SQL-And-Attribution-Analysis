@@ -11,6 +11,8 @@ from dataagent.engines.query.experiences.scheduler import (
     query_experience_index_scheduler,
 )
 
+from dataagent.engines.query.standard_metrics import standard_query, supports_standard_query
+
 __all__ = [
     "CeleryQueryExperienceIndexScheduler",
     "QueryExecutionService",
@@ -18,4 +20,6 @@ __all__ = [
     "QueryExperienceService",
     "query_assets_are_allowed",
     "query_experience_index_scheduler",
+    "standard_query",
+    "supports_standard_query",
 ]

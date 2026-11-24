@@ -1,6 +1,7 @@
 """用本回合已核对的单行查询结果生成简短数值答复。"""
 
 import json
+import re
 from decimal import Decimal
 from typing import Annotated
 
@@ -43,6 +44,9 @@ def deliver_query_values(
     | None = None,
 ) -> dict:
     """交付已核对的查询数值。用户同时问已知信息是否足以推算另一个量时，可用 missing_inputs 说明缺什么。归因、对账或其他解释走正常回答。"""
+    question = next((m for m in reversed(runtime.state["messages"]) if isinstance(m, HumanMessage)), None)
+    text = question.text if question else ""
+    percent_only = re.search(r"(?:^|[。？?！!，,\s])(?:请)?(?:只|仅)(?:回复|返回|输出)(?:一个)?百分[数比](?:[。.!！\s]|$)", text)
     for message in reversed(runtime.state["messages"]):
         if isinstance(message, HumanMessage):
             break
@@ -67,13 +71,15 @@ def deliver_query_values(
                 "status": "needs_revision",
                 "reason": "所选列不在已审计的单行首项结果中，请核对列名或补查。",
             }
+        if percent_only and (len(columns) != 1 or columns[0].unit != "%"):
+            return {"status": "needs_revision", "reason": "用户只要百分数。请查询有依据的百分比列，核对分子、分母和单位后重新交付。"}
         lines = []
         for item in columns:
             number = Decimal(values[item.column])
             formatted = format(number, ",f")
             if "." in formatted and item.unit == "%":
                 formatted = formatted.rstrip("0").rstrip(".")
-            lines.append(f"{item.label}：{formatted}{item.unit}")
+            lines.append(f"{formatted}%" if percent_only else f"{item.label}：{formatted}{item.unit}")
         if missing_inputs:
             lines.append(
                 "仅凭题中给出的汇总指标，无法推算所问结果。还需要"

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import appClient from "@/api/appClient";
 import { cn } from "@/lib/utils";
 import { AttachmentChip } from "@/features/chat/components/messages/AttachmentChip";
 import {
@@ -12,6 +13,23 @@ import type { MessageDisplayItem } from "@/features/chat/components/messages/typ
 /** 展示单条消息的正文、附件和时间信息。 */
 export function MessageBubble({ message }: { message: MessageDisplayItem["message"] }) {
   const isUser = message.role === "user";
+  const [feedback, setFeedback] = useState("不满意");
+  const submission = useRef<{feedback_id: string; comment: string} | null>(null);
+  async function reportReply() {
+    if (!message.conversationId || !message.messageId) return;
+    if (!submission.current) {
+      const comment = window.prompt("这条回复哪里没有解决你的问题？（可选）", "");
+      if (comment === null) return;
+      submission.current = {feedback_id: crypto.randomUUID(), comment: comment.slice(0, 1000)};
+    }
+    setFeedback("提交中");
+    try {
+      await appClient.post(`/api/v1/quality/conversations/${encodeURIComponent(message.conversationId)}/messages/${encodeURIComponent(message.messageId)}/feedback`, submission.current);
+      setFeedback("已提交");
+    } catch {
+      setFeedback("提交失败，重试");
+    }
+  }
   const createdAt = formatMessageTime(message.createdAt);
   const [previewImage, setPreviewImage] = useState<{
     src: string;
@@ -48,6 +66,9 @@ export function MessageBubble({ message }: { message: MessageDisplayItem["messag
             ))}
 
             {isUser ? null : attachmentChips}
+            {import.meta.env.VITE_QUALITY_FEEDBACK === "true" && message.role === "assistant" && message.messageId && message.conversationId && (
+              <button className="text-xs text-slate-500" disabled={feedback === "提交中" || feedback === "已提交"} onClick={reportReply}>{feedback}</button>
+            )}
           </div>
 
           {createdAt ? (

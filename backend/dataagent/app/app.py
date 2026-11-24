@@ -49,6 +49,9 @@ def _register_routes(app: FastAPI) -> None:
         prefix="/api/v1/admin/query-experiences",
     )
     app.include_router(chat_router, prefix="/api/v1/chat")
+    if os.getenv("QUALITY_PROJECT_ID"):
+        from dataagent.app.routers.quality import mount
+        mount(app)
     app.include_router(
         attachment_router,
         prefix="/api/v1/chat/attachment",
@@ -82,6 +85,9 @@ def _register_middlewares(app: FastAPI) -> None:
 
 def _create_app() -> FastAPI:
     """创建并组装 FastAPI 应用。"""
+    if os.getenv("AIOPS_QUALITY_PROFILE"):
+        from aiops_quality_bridge import load_profile
+        load_profile()
     setup_logger()
     app = FastAPI(lifespan=lifespan, responses=_ERROR_RESPONSES)
     _register_middlewares(app)

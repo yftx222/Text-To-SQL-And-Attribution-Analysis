@@ -72,6 +72,20 @@ def test_query_value_delivery_requires_a_current_passed_receipt_and_real_column(
     assert deliver_query_values.invoke(args)["status"] == "needs_revision"
 
 
+def test_percent_only_requires_a_percent_column_and_preserves_other_queries():
+    runtime = make_runtime()
+    data = dict(status="completed", agent_type="explorer", outcome={"verdict":"passed"},
+                primary_values={"passed":"7", "pass_pct":"35.00"})
+    receipt = ToolMessage(content=json.dumps(data), name="delegation", tool_call_id="observed")
+    runtime.state["messages"] = [HumanMessage(content="本周良率？请只回复百分数。"), receipt]
+    args = dict(runtime=runtime, delegation_id="observed")
+    count = [{"column":"passed", "label":"通过台数", "unit":"台"}]
+    assert deliver_query_values.invoke({**args,"columns":count})["status"] == "needs_revision"
+    assert deliver_query_values.invoke({**args,"columns":[{"column":"pass_pct","label":"良率","unit":"%"}]})["answer"] == "35%"
+    runtime.state["messages"][0] = HumanMessage(content="通过的设备有几台？")
+    assert deliver_query_values.invoke({**args,"columns":count})["answer"] == "通过台数：7台"
+
+
 def test_planner_ends_with_only_the_verified_numeric_receipt():
     from dataagent.engines.agent.common.middleware.message_context import (
         MessageContextMiddleware,

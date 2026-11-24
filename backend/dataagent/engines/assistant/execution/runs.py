@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import deque
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from loguru import logger
 
@@ -23,6 +24,7 @@ from dataagent.engines.assistant.sessions.identity import (
     conversation_lifecycle_lock_name,
 )
 from dataagent.engines.common.observability import run_metrics
+from dataagent.engines.common.observability.context import agent_run_id_ctx
 from dataagent.engines.contract.config import cfg
 from dataagent.engines.infra.errors import AdvisoryLockBusyError
 
@@ -193,6 +195,7 @@ class ConversationRunService:
         prepare: Callable[[], Awaitable[None]],
     ) -> None:
         """执行新回合或恢复回合，并把结果发布给全部订阅者。"""
+        agent_run_id_ctx.set(str(uuid4()))
         user_id, conversation_id = key
         started = None
         outcome = "completed"
@@ -241,6 +244,9 @@ class ConversationRunService:
         finally:
             if started is not None:
                 run_metrics.record(outcome, perf_counter() - started)
+                if os.getenv("QUALITY_PROJECT_ID"):
+                    from aiops_quality_bridge import signal
+                    await asyncio.to_thread(signal, "dataagent", conversation_id, run_id=agent_run_id_ctx.get())
 
     async def _publish(self, run: _ConversationRun, event: RunEvent) -> None:
         """按产生顺序缓存事件并广播给所有当前订阅者。"""

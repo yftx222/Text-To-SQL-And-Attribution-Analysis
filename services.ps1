@@ -5,6 +5,11 @@ param([switch]$Stop, [switch]$Status)
 $ErrorActionPreference = 'Stop'
 if ($Stop -and $Status) { throw 'Choose either -Stop or -Status.' }
 $ProjectRoot = $PSScriptRoot
+$qualityProfile = Join-Path $env:LOCALAPPDATA 'AIOps\quality-local\dataagent.json'
+if (Test-Path -LiteralPath $qualityProfile) {
+    $env:AIOPS_QUALITY_PROFILE = $qualityProfile
+    $env:VITE_QUALITY_FEEDBACK = 'true'
+}
 $BackendRoot = Join-Path $ProjectRoot 'backend'
 $FrontendRoot = Join-Path $ProjectRoot 'frontend'
 $PythonPath = Join-Path $ProjectRoot '.venv\Scripts\python.exe'

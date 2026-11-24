@@ -63,6 +63,7 @@ class ToolResultPart(BaseModel):
     tool_call_id: str = Field(..., description="工具调用ID")
     name: str = Field(..., description="工具名称")
     content: str = Field(..., description="工具执行结果")
+    status: Literal["success", "error"] | None = None
 
 
 MessageRole = Literal["user", "assistant", "tool", "system"]
@@ -120,6 +121,7 @@ class MessageResponse(BaseModel):
     """返回给客户端的消息。"""
 
     message_id: str | None = Field(default=None, description="LangGraph 消息ID")
+    agent_run_id: str | None = None
     created_at: datetime | None = Field(default=None, description="消息创建时间")
     role: MessageRole = Field(..., description="发送者")
     parts: list[MessagePart] = Field(..., description="消息片段")

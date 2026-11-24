@@ -106,6 +106,7 @@ async def langchain_message_to_schema(
             role="tool",
             parts=[
                 chat_schema.ToolResultPart(
+                    status=message.status,
                     type="tool_result",
                     tool_call_id=message.tool_call_id,
                     name=message.name or "",
@@ -160,6 +161,7 @@ async def langchain_message_to_schema(
         else None
     )
     schema = chat_schema.MessageResponse(
+        agent_run_id=message.additional_kwargs.get("dataagent_run_id"),
         message_id=message.id,
         created_at=(
             context.received_at if context is not None else _message_created_at(message)

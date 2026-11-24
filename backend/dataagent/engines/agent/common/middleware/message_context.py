@@ -28,6 +28,7 @@ from loguru import logger
 from pydantic import Field, ValidationError, field_validator
 
 from dataagent.engines.agent.common.shell_jobs import ShellJobRuntime
+from dataagent.engines.common.observability.context import agent_run_id_ctx
 from dataagent.engines.agent.common.tools.view_image import (
     IMAGE_VIEW_TOOL_NAME,
     ImageViewRequest,
@@ -639,6 +640,8 @@ def _image_projection_options(request: ModelRequest[Any]) -> tuple[bool, bool]:
 def _stamp_response(response: ModelResponse[Any]) -> ModelResponse[Any]:
     """为模型响应中的消息补充统一创建时间。"""
     for message in response.result:
+        if run_id := agent_run_id_ctx.get():
+            message.additional_kwargs.setdefault("dataagent_run_id", run_id)
         message.additional_kwargs.setdefault(
             MESSAGE_CREATED_AT_KEY,
             datetime.now(UTC).isoformat(),

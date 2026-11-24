@@ -3,6 +3,7 @@
 from contextvars import ContextVar
 
 request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
+agent_run_id_ctx: ContextVar[str | None] = ContextVar("agent_run_id", default=None)
 trace_id_ctx: ContextVar[str | None] = ContextVar("trace_id", default=None)
 client_ip_ctx: ContextVar[str | None] = ContextVar("client_ip", default=None)
 method_ctx: ContextVar[str | None] = ContextVar("method", default=None)

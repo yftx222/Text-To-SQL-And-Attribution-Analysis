@@ -19,8 +19,31 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-async def snapshot():
-    doris = DorisClientManager(cfg.doris)
+def deployment_inputs():
+    backend = HERE.parent
+    files = sorted(
+        p
+        for p in (backend / "dataagent").rglob("*")
+        if p.suffix in {".py", ".md", ".yaml"}
+    )
+    return {
+        "git": (
+            subprocess.check_output(
+                ["git", "-C", str(backend), "rev-parse", "HEAD"],
+                text=True,
+            )
+        ).strip(),
+        "source": sha(
+            "".join(
+                p.relative_to(backend).as_posix() + sha(p.read_bytes()) for p in files
+            ).encode()
+        ),
+        "config": sha((backend / "conf/app_config.yaml").read_bytes()),
+    }
+
+
+async def snapshot(*, fixture_config=None, catalog_only=False):
+    doris = DorisClientManager(fixture_config or cfg.doris)
     pg = PostgresClientManager(cfg.meta_postgresql)
     tables, metadata = {}, {}
     try:
@@ -39,6 +62,24 @@ async def snapshot():
                     for row in rows
                 )
                 tables[name] = [len(hashes), sha("".join(hashes).encode())]
+                if catalog_only:
+                    columns = (
+                        await con.exec_driver_sql(
+                            "SELECT column_name,ordinal_position,column_type,is_nullable "
+                            "FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=%s "
+                            "ORDER BY ordinal_position",
+                            (name,),
+                        )
+                    ).all()
+                    if not columns:
+                        raise ValueError("missing fixture table schema")
+                    tables[name].append(
+                        sha(
+                            json.dumps(
+                                [tuple(c) for c in columns], default=str
+                            ).encode()
+                        )
+                    )
         async with pg.engine.connect() as con:
             names = (
                 await con.exec_driver_sql(
@@ -46,6 +87,16 @@ async def snapshot():
                 )
             ).scalars()
             for name in sorted(names):
+                if catalog_only and name not in {
+                    "table_info",
+                    "column_info",
+                    "metric_info",
+                    "column_metric",
+                    "query_experiences",
+                    "query_experience_assets",
+                    "ontology_definitions",
+                }:
+                    continue
                 if name.startswith(("alembic", "query_execution")):
                     continue
                 quoted = '"' + name.replace('"', '""') + '"'
@@ -61,52 +112,52 @@ async def snapshot():
         es.value_index,
         es.query_experience_index,
     ]
-    with httpx.Client(trust_env=False, timeout=20) as client:
-        resp = client.get(
-            f"http://{es.host}:{es.port}/"
-            + ",".join(indices)
-            + "/_stats/docs?level=shards"
-        )
-        resp.raise_for_status()
-        es_state = {
-            name: {
-                "uuid": value["uuid"],
-                "docs": value["primaries"]["docs"]["count"],
-                "seq": {
-                    s: next(
-                        copy["seq_no"]["max_seq_no"]
-                        for copy in copies
-                        if copy["routing"]["primary"]
-                    )
-                    for s, copies in value["shards"].items()
+    async with httpx.AsyncClient(trust_env=False, timeout=20) as client:
+
+        async def stats(selector):
+            resp = await client.get(
+                f"http://{es.host}:{es.port}/{selector}/_stats/docs",
+                params={
+                    "level": "shards",
+                    "ignore_unavailable": "false",
+                    "allow_no_indices": "false",
                 },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if catalog_only and (not data["indices"] or data["_shards"]["failed"]):
+                raise ValueError("missing index state")
+            return {
+                name: {
+                    "uuid": value["uuid"],
+                    "docs": value["primaries"]["docs"]["count"],
+                    "seq": {
+                        s: next(
+                            copy["seq_no"]["max_seq_no"]
+                            for copy in copies
+                            if copy["routing"]["primary"]
+                        )
+                        for s, copies in value["shards"].items()
+                    },
+                }
+                for name, value in data["indices"].items()
             }
-            for name, value in resp.json()["indices"].items()
-        }
-    backend = HERE.parent
-    files = sorted(
-        p
-        for p in (backend / "dataagent").rglob("*")
-        if p.suffix in {".py", ".md", ".yaml"}
-    )
+
+        if catalog_only:
+            observed = await asyncio.gather(*(stats(name) for name in indices))
+            es_state = {
+                (name if selector == name else f"{selector}/{name}"): value
+                for selector, group in zip(indices, observed, strict=True)
+                for name, value in group.items()
+            }
+        else:
+            es_state = await stats(",".join(indices))
     return {
         "time": datetime.now(UTC).isoformat(),
         "tables": tables,
         "metadata": metadata,
         "es": es_state,
-        "git": (
-            await asyncio.to_thread(
-                subprocess.check_output,
-                ["git", "-C", str(backend), "rev-parse", "HEAD"],
-                text=True,
-            )
-        ).strip(),
-        "source": sha(
-            "".join(
-                p.relative_to(backend).as_posix() + sha(p.read_bytes()) for p in files
-            ).encode()
-        ),
-        "config": sha((backend / "conf/app_config.yaml").read_bytes()),
+        **await asyncio.to_thread(deployment_inputs),
         "models": {k: v.model for k, v in cfg.lm_config.models.items()},
         "limits": cfg.agent.orchestration.model_dump(),
     }

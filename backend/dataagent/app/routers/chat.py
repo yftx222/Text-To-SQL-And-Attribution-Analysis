@@ -1,10 +1,11 @@
 """对话管理、语义召回与 Agent SSE 流式交互路由。"""
 
 import json
+from contextlib import nullcontext
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from dataagent.app.dependencies import AnalysisUserDep, CurrentUserDep, WebResourcesDep
@@ -128,6 +129,7 @@ async def api_get_subagent_messages(
     },
 )
 async def api_stream_chat(
+    request: Request,
     body: chat_schema.ChatStreamRequest,
     turns: ConversationTurnServiceDep,
     current_user: AnalysisUserDep,
@@ -138,7 +140,9 @@ async def api_stream_chat(
     # 为不同异步上下文分别保存值，支持多个用户并发处理。
     context.user_id_ctx.set(str(user_id))
     # 表示“开始处理这一轮问答”。events：一个可持续读取事件的异步生成器
-    events = await turns.start(user_id, body.conversation_id, body.message)
+    sink = getattr(request.app.state, "eval_traces", None)
+    with sink.capture(request.headers, current_user, body.conversation_id) if sink else nullcontext():
+        events = await turns.start(user_id, body.conversation_id, body.message)
     return _sse_response(body.conversation_id, events)
 
 

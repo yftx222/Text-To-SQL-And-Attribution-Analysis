@@ -56,3 +56,13 @@ python -m evals.process_score <实验目录> --group first --review-template <�
 将填好的模板保存为组目录的 `process_reviews.json`。每个判断填写真实运行的证据文件、SHA-256、行号或报告位置及理由。额外追问按题判，结论支持按交付内容中的每条可验证结论判。权限项核对当前角色可见的终答、工具结果和附件。故障项核对指定故障确实发生及原目标是否完成。发布项按同一版本计一次，`requests` 记录实际提交次数。空值表示待裁决；有证据表明未触发场景时填 `not_exposed`。报告同时列已裁决分母、待裁决数和未触发数。
 
 费用使用实验目录的 `prices.json`。填写 `version`、`currency` 和 `models`；每个实际模型名下填写每百万 Token 的 `uncached_input`、`cache_read` 和 `output` 单价。成本包含失败尝试，除以首次正确交付数。价格缺失、收费桶无法拆分或重试用量无法确认时，保留已知 Token，完整成本显示为空。
+
+### Evaluation-Platform D2
+
+使用现有评测部署 `python -m evals.serve <新日志目录> --port <端口>`。启用回传前，将中台发布制品 `evaluation_platform_trace-0.2.0-py3-none-any.whl` 安装到该服务的虚拟环境，再配置以下环境变量。
+
+- `DATAAGENT_TRACE_PLATFORM_URL` 为 API 根地址。生产使用 HTTPS，本机联调可用回环 HTTP。
+- `DATAAGENT_TRACE_USER` 为获准的专用普通账号。该账号和合成数据的只读配置沿用 D1。
+- 在中台选择 DataAgent build 2，开启 callback 模式，并把项目版本 ID 加入 Worker 的 `EVAL_TRACE_TARGET_VERSIONS`。
+
+评测服务在每轮对话的后台任务中记录调用结构和计数。结束时由 Adapter 核对历史和文件，再请求评测服务使用 SDK 批量回传并封口。多轮和最后的封口请求须路由到同一评测进程。本地 JSONL 继续由 `evals.serve` 写入。省略回传 URL 时仅使用本地采集。独立运行 `pytest tests/evals/test_platform_trace.py` 可验证账号、会话和回调隔离，也可验证接收服务离线时的行为。

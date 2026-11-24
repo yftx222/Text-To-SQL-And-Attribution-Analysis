@@ -127,8 +127,11 @@ class AnalysisQueryService:
             evaluation.emit("sql_start", run=str(execution_id))
             try:
                 summary = await self._execute_to_csv(csv_file, normalized_sql)
-            finally:
-                evaluation.emit("sql_end", run=str(execution_id))
+            except BaseException:
+                evaluation.emit("sql_end", run=str(execution_id), outcome="failed")
+                raise
+            else:
+                evaluation.emit("sql_end", run=str(execution_id), outcome="ok")
             temporary_file.seek(0)
             digest = hashlib.file_digest(temporary_file, "sha256").hexdigest()
             temporary_file.seek(0)

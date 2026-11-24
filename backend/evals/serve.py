@@ -3,21 +3,19 @@
 import argparse
 import asyncio
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
 import uvicorn
-from langchain_core.callbacks import BaseCallbackHandler
 
 from dataagent.engines.common.async_runtime import run_async
 from dataagent.engines.common.observability import context, evaluation
 from dataagent.engines.contract.config import cfg
 
 
-class TraceWriter(BaseCallbackHandler):
-    run_inline = True
-
+class JsonlTraceSink:
     def __init__(self, target):
         self.target = target
         self.lock = Lock()
@@ -35,86 +33,48 @@ class TraceWriter(BaseCallbackHandler):
         with self.lock, self.target.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
-    def on_chat_model_start(
-        self,
-        serialized,
-        messages,
-        *,
-        run_id,
-        parent_run_id=None,
-        metadata=None,
-        **kwargs,
-    ):
-        meta = metadata or {}
-        self.write(
-            "model_start",
-            run=run_id,
-            parent=parent_run_id,
-            model=meta.get("ls_model_name"),
-            role=meta.get("agent_type", "planner"),
-            session=meta.get("session_id"),
-            delegation=meta.get("delegation_id"),
-        )
-
-    def on_chain_start(
-        self,
-        serialized,
-        inputs,
-        *,
-        run_id,
-        parent_run_id=None,
-        name=None,
-        metadata=None,
-        **kwargs,
-    ):
-        meta = metadata or {}
-        self.write(
-            "chain",
-            run=run_id,
-            parent=parent_run_id,
-            name=name,
-            step=meta.get("langgraph_step"),
-            node=meta.get("langgraph_node"),
-        )
-
-    def on_llm_end(self, response, *, run_id, **kwargs):
-        message = response.generations[0][0].message
-        usage = getattr(message, "usage_metadata", None)
-        self.write("model_end", run=run_id, usage=usage)
-
-    def on_chain_end(self, outputs, *, run_id, **kwargs):
-        self.write("chain_end", run=run_id)
-
-    def on_chain_error(self, error, *, run_id, **kwargs):
-        self.write("chain_error", run=run_id)
-
-    def on_llm_error(self, error, *, run_id, **kwargs):
-        self.write("model_error", run=run_id, error=type(error).__name__)
-
-    def on_tool_start(
-        self, serialized, input_str, *, run_id, parent_run_id=None, **kwargs
-    ):
-        self.write(
-            "tool_start", name=serialized.get("name"), run=run_id, parent=parent_run_id
-        )
-
-    def on_tool_end(self, output, *, run_id, **kwargs):
-        self.write(
-            "tool_end", run=run_id, tool_call_id=getattr(output, "tool_call_id", None)
-        )
-
-    def on_tool_error(self, error, *, run_id, **kwargs):
-        self.write("tool_error", run=run_id, error=type(error).__name__)
-
 
 async def serve(folder, port):
     from dataagent.app.app import app
 
     cfg.query.learn_from_queries = False
     folder.mkdir(parents=True, exist_ok=True)
-    writer = TraceWriter(folder / "telemetry.jsonl")
-    evaluation.observe = writer.write
-    evaluation.callback = writer
+    writer = JsonlTraceSink(folder / "telemetry.jsonl")
+
+    @app.middleware("http")
+    async def local_observation(request, call_next):
+        token = evaluation.observer.set(evaluation.Observer(writer))
+        try:
+            return await call_next(request)
+        finally:
+            evaluation.observer.reset(token)
+
+    fixture = os.getenv("DATAAGENT_FIXTURE_VERSION")
+    if fixture:
+        from evals.profile import EvaluationProfile
+
+        profile = EvaluationProfile(
+            os.environ["DATAAGENT_PROFILE_USER"],
+            os.environ["DATAAGENT_PROFILE_ROLE"],
+            os.environ["DATAAGENT_FIXTURE_DATABASE"],
+            fixture,
+        )
+        app.add_api_route(
+            "/_eval/environment", profile.read, methods=["GET"], include_in_schema=False
+        )
+
+    target = os.getenv("DATAAGENT_TRACE_PLATFORM_URL")
+    if target:
+        from evals.platform_trace import EvaluationPlatformTraceSink
+
+        sink = EvaluationPlatformTraceSink(target, os.environ["DATAAGENT_TRACE_USER"])
+        app.state.eval_traces = sink
+        app.add_api_route(
+            "/_eval/trace/finish",
+            sink.finish,
+            methods=["POST"],
+            include_in_schema=False,
+        )
 
     @app.get("/_eval/status", include_in_schema=False)
     def status():

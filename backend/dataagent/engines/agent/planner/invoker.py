@@ -72,8 +72,8 @@ async def run_agent_turn(
         while True:
             last_finish_reason: str | None = None
             config = build_planner_config(user_id, conversation_id)
-            if evaluation.callback is not None:
-                config["callbacks"] = [evaluation.callback]
+            if (observer := evaluation.observer.get()) is not None:
+                config["callbacks"] = [observer]
 
             # LangGraph 的重载声明返回 AsyncIterator，实际 astream 是异步生成器。
             async with aclosing(
